@@ -1,56 +1,67 @@
 import numpy as np
-from scipy.signal import remez, lfilter
-from scipy.signal import firwin, upfirdn, kaiserord
+from scipy.signal import remez, lfilter, firwin, upfirdn, kaiserord
 
 def generator(prm):
-    
+    """
+    Генератор комплексного базового сигнала:
+    1) комплексный белый шум (I/Q симметрично)
+    2) полосовой (в базе) FIR lowpass через remez (в нормированных частотах 0..0.5)
+    3) опциональный апсемплинг up через Kaiser FIR + upfirdn
+    """
     txSigBw = 16
-    margFs  = 0.7
-    maxAbs = round(2**(txSigBw - 1) * margFs)
+    margFs = 0.7
+    maxAbs = int(round(2 ** (txSigBw - 1) * margFs))
 
-    sizeSig = prm["sizeSig"]
-    txFs = prm["txFs"]
-    sigBand = prm["sigBand"]
-    up = prm["up"]
+    sizeSig = int(prm["sizeSig"])
+    txFs = float(prm["txFs"])
+    sigBand = float(prm["sigBand"])
+    up = int(prm["up"])
 
-    # Complex white noise
-    y = ((np.random.rand(sizeSig) * 2 - 1) + 1j*(np.random.rand(sizeSig) * 2 - 1))*maxAbs
+    # -----------------------------
+    # 1) Complex white noise (I/Q balanced)
+    # -----------------------------
+    y = ((np.random.rand(sizeSig) * 2 - 1) + 1j * (np.random.rand(sizeSig) * 2 - 1)) * maxAbs
+    y = y.astype(np.complex128)
 
-    # FIR filter
+    # -----------------------------
+    # 2) Baseband lowpass FIR (remez)
+    # -----------------------------
     inBbFirSlopeMarg = 0.2
-    Fpass = sigBand / txFs
+    Fpass = sigBand / txFs                 # normalized to Fs
     Fstop = Fpass * (1 + inBbFirSlopeMarg)
 
-    bands = [0, Fpass, Fstop, 0.5]
-    desired = [1, 0]
+    # remez expects bands in [0, 0.5] when fs=1.0 (Nyquist=0.5)
+    bands = [0.0, Fpass, Fstop, 0.5]
+    desired = [1.0, 0.0]
 
-    N = 128  # фиксируем порядок
-    b = remez(N, bands, desired)
+    numtaps_bb = 129  # лучше нечётное для линейной фазы и целой задержки
+    b = remez(numtaps_bb, bands, desired, fs=1.0)
 
-    y_filt = lfilter(b, 1, y)
-    
-    y_filt = np.round(y_filt)
+    y_filt = lfilter(b, 1.0, y)
 
-    # Interpolation
+    # Компенсация групповой задержки (линейно-фазовый FIR)
+    delay_bb = (len(b) - 1) // 2
+    y_filt = y_filt[delay_bb:]  # сдвигаем вперёд
+    # Чтобы длина была предсказуемой: подрежем хвост под исходную длину
+    y_filt = y_filt[:sizeSig - delay_bb]
 
-    atten = 90  # dB подавления образов
-    width = 0.1 / up  # ширина переходной полосы (норм.)
-    
-    N, beta = kaiserord(atten, width)
+    # -----------------------------
+    # 3) Interpolation (upfirdn) + delay compensation
+    # -----------------------------
+    if up > 1:
+        atten = 90.0
+        width = 0.1 / up  # нормированная ширина перехода
+        N, beta = kaiserord(atten, width)
+        N = int(np.ceil(N / up) * up)  # кратно up (polyphase-friendly)
+        if N % 2 == 0:
+            N += 1  # нечётная длина -> целая групповая задержка
 
-    # делаем длину кратной up (лучше для polyphase)
-    N = int(np.ceil(N / up) * up)
+        h = firwin(numtaps=N, cutoff=1.0 / up, window=("kaiser", beta))
+        y_up = upfirdn(h, y_filt, up=up)
 
-    h = firwin(
-    numtaps=N,
-    cutoff=1 / up,
-    window=("kaiser", beta)
-    )
+        delay_up = (len(h) - 1) // 2
+        # upfirdn даёт задержку в выходных отсчётах (после up)
+        y_up = y_up[delay_up:-delay_up] if delay_up > 0 else y_up
+        return y_up.astype(np.complex128)
 
-    y_up = upfirdn(h, y_filt, up)
-    
-    # компенсируем групповую задержку
-    delay = (len(h) - 1) // 2
-    y_up = y_up[delay : -delay]
-
-    return y_up
+    return y_filt.astype(np.complex128)

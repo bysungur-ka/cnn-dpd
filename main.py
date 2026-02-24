@@ -2,119 +2,127 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal
 
-# Import required modules (user-provided)
 from generator import generator
 from amp_model import amp_model
+
+from ls_alg import align_by_xcorr, ls_postdistorter_coeffs, apply_predistorter, nmse_db, nmse_db_gain_aligned
 from cnn_dpd import cnn_dpd
 
-def plot_spectrum(sig, fs):
-    sig = np.asarray(sig)
-
-    f, Pxx = signal.welch(
-        sig,
-        fs=fs,
-        window='hann',
-        nperseg=4096,
-        noverlap=2048,
-        return_onesided=False,
-        scaling='density'
-    )
-
-    Pxx = np.fft.fftshift(Pxx)
-    center = len(Pxx) // 2
-    Pxx[center] = Pxx[center-1]
-
-    f = np.fft.fftshift(f)
-
-    Pxx_db = 10 * np.log10(Pxx / np.max(Pxx) + 1e-15)
-
-    plt.figure()
-    plt.plot(f, Pxx_db)
-    plt.xlabel("Frequency, Hz")
-    plt.ylabel("PSD, dB")
-    plt.title("Smoothed spectrum (Welch)")
-    plt.grid(True)
-    plt.show()
-
 def main():
-    # Clear state (Python equivalent)
     plt.close('all')
-    
-    # Parameters
+
+    # -----------------------------
+    # Choose method: "ls" or "cnn"
+    # -----------------------------
+    method = "ls"   
+
     prm = {
-        'sizeSig': int(1e5),
-        'txFs': 100e6,      # 100 MHz
-        'sigBand': 20e6,    # 20 MHz bandwidth
-        'up': 4             # Upsampling factor
+        'sizeSig': int(2e4),
+        'txFs': 100e6,
+        'sigBand': 20e6,
+        'up': 4
     }
-    
-    # Signal generation
-    sig = generator(prm)
-    sigNorm = sig / np.max(np.abs(sig))
-    
-    # PA modeling
-    sigAmp = amp_model(prm, sigNorm)
-    sigAmpNorm = sigAmp / np.max(np.abs(sigAmp)) * np.max(np.abs(sig))
-    ampGain = np.sqrt(np.mean(np.abs(sigAmp)**2) / np.mean(np.abs(sigNorm)**2))
-    
-    # CNN-DPD configuration
+
+    # CNN params (используются только если method == "cnn")
     prm['cnn'] = {
-        'memory': 3,      # DPD memory depth
-        'epochs': 20,
-        'lr': 0.4,        # High learning rate as in original
-        'ampGain': ampGain
+        'memory': 5,
+        'epochs': 500,
+        'lr': 1e-2,
+        'M1': 16,
+        'M2': 16,
+        'filters': 8,
+        'seed': 42,
+        'monitor': False,
+        'print_every': 1
     }
+
+    # -----------------------------
+    # Generate + normalize reference
+    # -----------------------------
+    sig = generator(prm)
+    x = sig / (np.max(np.abs(sig)) + 1e-15)
+
+    # PA output (no DPD)
+    y = amp_model(prm, x)
+
+    # Align (полезно, особенно если up>1 и фильтры)
+    x_al, y_al, lag = align_by_xcorr(x, y, max_lag=300)
+    print(f"Alignment lag = {lag} samples. Using aligned length = {len(x_al)}")
+
+    # -----------------------------
+    # DPD
+    # -----------------------------
+    if method.lower() == "ls":
+        orders = (1, 3, 5)
+        ridge = 1e-6
+        a = ls_postdistorter_coeffs(y_al, x_al, orders=orders, ridge=ridge)
+        x_dpd = apply_predistorter(x_al, a, orders=orders)
+        model = {'a': a, 'orders': orders, 'ridge': ridge}
+
+    elif method.lower() == "cnn":
+        # IMPORTANT: cnn_dpd expects (clean, distorted) in the same time alignment
+        # We already aligned x_al, y_al, so pass those.
+        x_dpd, model = cnn_dpd(x_al, y_al, prm)
+        # cnn_dpd возвращает в исходной шкале (как x_al), но у нас x_al уже нормирован.
+        # Для безопасности можно ещё раз нормировать по max:
+        # x_dpd = x_dpd / (np.max(np.abs(x_dpd)) + 1e-15)
+
+    else:
+        raise ValueError('method must be "ls" or "cnn"')
     
-    # Train DPD
-    sig_dpd, model = cnn_dpd(sig, sigAmp, prm)
-    
-    # Linearized output (DPD → PA)
-    sigAmp_linear = amp_model(prm, sig_dpd) / ampGain
-    
-    f, PxxAmp = signal.welch(
-        sigAmp/ampGain,
-        fs=prm['txFs']*prm['up'],
-        window='hann',
-        nperseg=4096,
-        noverlap=2048,
-        return_onesided=False,
-        scaling='density'
+    p_ref = np.mean(np.abs(x_al)**2)
+    p_dpd = np.mean(np.abs(x_dpd)**2) + 1e-15
+    #x_dpd = x_dpd * np.sqrt(p_ref / p_dpd)
+
+    # PA output after DPD
+    y_lin = amp_model(prm, x_dpd)
+
+    # -----------------------------
+    # Metrics (NMSE to x_al)
+    # -----------------------------
+    nmse_before = nmse_db_gain_aligned(y_al, x_al)
+    nmse_after  = nmse_db_gain_aligned(y_lin, x_al)
+    print(f"Gain-aligned NMSE before DPD: {nmse_before:.2f} dB")
+    print(f"Gain-aligned NMSE after  DPD: {nmse_after:.2f} dB")
+
+    # -----------------------------
+    # PSD plot (Welch)
+    # -----------------------------
+    fs = prm['txFs'] * prm['up']
+
+    f, Pxx_before = signal.welch(
+        y_al, fs=fs, window='hann', nperseg=4096, noverlap=2048,
+        return_onesided=False, scaling='density'
+    )
+    _, Pxx_after = signal.welch(
+        y_lin, fs=fs, window='hann', nperseg=4096, noverlap=2048,
+        return_onesided=False, scaling='density'
     )
 
-    PxxAmp = np.fft.fftshift(PxxAmp)
-    center = len(PxxAmp) // 2
-    PxxAmp[center] = PxxAmp[center-1]
-    
-    fLinear, PxxLinear = signal.welch(
-        sigAmp_linear,
-        fs=prm['txFs']*prm['up'],
-        window='hann',
-        nperseg=4096,
-        noverlap=2048,
-        return_onesided=False,
-        scaling='density'
-    )
-
-    PxxLinear = np.fft.fftshift(PxxLinear)
-    center = len(PxxLinear) // 2
-    PxxLinear[center] = PxxLinear[center-1]
-
+    Pxx_before = np.fft.fftshift(Pxx_before)
+    Pxx_after = np.fft.fftshift(Pxx_after)
     f = np.fft.fftshift(f)
 
-    PxxAmp_db = 10 * np.log10(PxxAmp / np.max(PxxAmp) + 1e-15)
-    PxxLinear_db = 10 * np.log10(PxxLinear / np.max(PxxLinear) + 1e-15)
+    center = len(Pxx_before) // 2
+    if center > 0:
+        Pxx_before[center] = Pxx_before[center - 1]
+        Pxx_after[center] = Pxx_after[center - 1]
+
+    #ref = np.max(Pxx_before) + 1e-15
+    PxxB_db = 10*np.log10(Pxx_before/(np.max(Pxx_before) + 1e-15) + 1e-15)
+    PxxA_db = 10*np.log10(Pxx_after /(np.max(Pxx_after) + 1e-15) + 1e-15)
 
     plt.figure()
-    plt.plot(f / 1e6, PxxAmp_db, 'r', linewidth=1.5, label='Before DPD')
-    plt.plot(f / 1e6, PxxLinear_db, 'b', linewidth=1.5, label='After DPD')
+    plt.plot(f / 1e6, PxxB_db, 'r', linewidth=1.5, label='Before DPD')
+    plt.plot(f / 1e6, PxxA_db, 'b', linewidth=1.5, label=f'After DPD (method={method})')
     plt.xlabel('Frequency, MHz')
-    plt.ylabel('Magnitude, dB')
-    plt.title('Power Spectral Density of generated signal')
+    plt.ylabel('PSD, dB (normalized)')
+    plt.title('Power Spectral Density (PA output)')
     plt.xlim([-100, 100])
     plt.ylim([-100, 0])
+    plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.grid(True)
     plt.show()
 
 
