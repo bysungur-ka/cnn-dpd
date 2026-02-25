@@ -1,12 +1,12 @@
+# cnn_dpd.py
 import numpy as np
-
 
 # ----------------------------
 # Initializers / activations
 # ----------------------------
 def _he_normal(rng, fan_in, shape):
     """Kaiming/He normal init for ReLU."""
-    return rng.randn(*shape) * np.sqrt(2.0 / fan_in)
+    return rng.randn(*shape) * np.sqrt(2.0 / max(1, fan_in))
 
 
 def _relu(z):
@@ -45,30 +45,38 @@ def cnn_dpd(sig_clean: np.ndarray, sig_distorted: np.ndarray, prm: dict):
       - Train postdistorter g: y -> x
       - Apply as predistorter: x_dpd = g(x)
 
-    Architecture (proper multi-channel 1D CNN):
-      Conv1D (C channels -> F filters) + ReLU
-      FC + ReLU
-      FC + ReLU
+    Architecture:
+      Conv1D (C channels -> F filters, kernel length K) + ReLU
+      FC(M1) + ReLU
+      FC(M2) + ReLU
       Linear(2)
+
+    Shapes:
+      Xy: (C,N)
+      Zc/Ac: (F,N)
+      Z1/A1: (M1,N)
+      Z2/A2: (M2,N)
+      Yh: (2,N)
     """
 
-    cnn_prm = prm.get('cnn', {})
-    M = int(cnn_prm.get('memory', 1))
-    K = M
-    F = int(cnn_prm.get('filters', 32))
-    M1 = int(cnn_prm.get('M1', 64))
-    M2 = int(cnn_prm.get('M2', 64))
-    lr = float(cnn_prm.get('lr', 1e-3))
-    epochs = int(cnn_prm.get('epochs', 300))
-    seed = int(cnn_prm.get('seed', 42))
-    print_every = int(cnn_prm.get('print_every', 10))
+    cnn_prm = prm.get("cnn", {})
+    M = int(cnn_prm.get("memory", 1))
+    K = int(cnn_prm.get("kernel", M))   # allow override; default K=M
+    F = int(cnn_prm.get("filters", 32))
+    M1 = int(cnn_prm.get("M1", 64))
+    M2 = int(cnn_prm.get("M2", 64))
+    lr = float(cnn_prm.get("lr", 1e-3))
+    epochs = int(cnn_prm.get("epochs", 300))
+    seed = int(cnn_prm.get("seed", 42))
+    print_every = int(cnn_prm.get("print_every", 10))
 
-    features = str(cnn_prm.get('features', 'poly'))  # "iq" or "poly"
-    debug_stats = bool(cnn_prm.get('debug_stats', False))
+    features = str(cnn_prm.get("features", "poly"))  # "iq" or "poly"
+    debug_stats = bool(cnn_prm.get("debug_stats", False))
 
     # optional stabilization knobs
-    weight_decay = float(cnn_prm.get('weight_decay', 0.0))  # e.g. 1e-6
-    clip = float(cnn_prm.get('clip', 0.0))                  # e.g. 5.0 (0 disables)
+    weight_decay = float(cnn_prm.get("weight_decay", 0.0))  # e.g. 1e-6
+    clip = float(cnn_prm.get("clip", 0.0))                  # e.g. 5.0 (0 disables)
+    eps = 1e-12
 
     sig_clean = np.asarray(sig_clean, dtype=np.complex128)
     sig_distorted = np.asarray(sig_distorted, dtype=np.complex128)
@@ -76,53 +84,58 @@ def cnn_dpd(sig_clean: np.ndarray, sig_distorted: np.ndarray, prm: dict):
     sig_clean = sig_clean[:N]
     sig_distorted = sig_distorted[:N]
 
-    # consistent scale for complex signals
+    # consistent scale
     scale = np.max(np.abs(sig_clean)) + 1e-15
-    x = sig_clean / scale
-    y = sig_distorted / scale
+    x = sig_clean #/ scale
+    y = sig_distorted #/ scale
 
     # targets in I/Q
-    Y = np.vstack([x.real, x.imag])   # (2,N)
+    Y = np.vstack([x.real, x.imag])  # (2,N), float64
 
-    # valid region
+    # valid region for causal conv
     n_valid = np.arange(K - 1, N, dtype=int)
     N_valid = len(n_valid)
     if N_valid <= 0:
-        raise ValueError("Not enough samples for given memory/kernel length.")
+        raise ValueError("Not enough samples for given kernel length K.")
 
-    # feature channels for y
+    # feature channels for y (train input)
     Xy = _make_feature_channels(y, features)  # (C,N)
     C = Xy.shape[0]
 
     # ----------------------------
-    # Per-channel RMS normalization (CRITICAL)
+    # Per-channel RMS normalization (train-time)
     # ----------------------------
-    eps = 1e-12
+    # Use only valid region for RMS estimate (as in your code)
     feat_rms = np.sqrt(np.mean(Xy[:, n_valid] ** 2, axis=1, keepdims=True) + eps)  # (C,1)
     Xy = Xy / feat_rms
 
     rng = np.random.RandomState(seed)
 
-    # He init for ReLU
+    # ----------------------------
+    # Params init
+    # ----------------------------
     Wc = _he_normal(rng, fan_in=C * K, shape=(F, K, C))
-    bc = np.zeros((F, 1))
+    bc = np.zeros((F, 1), dtype=np.float64)
 
     W1 = _he_normal(rng, fan_in=F, shape=(M1, F))
-    b1 = np.zeros((M1, 1))
+    b1 = np.zeros((M1, 1), dtype=np.float64)
 
     W2 = _he_normal(rng, fan_in=M1, shape=(M2, M1))
-    b2 = np.zeros((M2, 1))
+    b2 = np.zeros((M2, 1), dtype=np.float64)
 
     Wout = _he_normal(rng, fan_in=M2, shape=(2, M2))
-    bout = np.zeros((2, 1))
+    bout = np.zeros((2, 1), dtype=np.float64)
 
-    print(f"Training CNN ILA (ReLU) y->x, features={features}, C={C}, K={K}...")
+    print(f"Training CNN ILA (ReLU) y->x, features={features}, C={C}, K={K}, F={F}...")
 
     def _clip_inplace(G):
         nrm = np.linalg.norm(G)
         if nrm > clip:
             G *= (clip / (nrm + 1e-15))
 
+    # ----------------------------
+    # Training loop
+    # ----------------------------
     for ep in range(epochs):
         # ---------- forward conv ----------
         Zc = np.zeros((F, N), dtype=np.float64)
@@ -144,22 +157,24 @@ def cnn_dpd(sig_clean: np.ndarray, sig_distorted: np.ndarray, prm: dict):
         if debug_stats and (ep == 0 or (ep + 1) % print_every == 0):
             print("max|Zc| =", float(np.max(np.abs(Zc[:, n_valid]))))
             print("max|A1| =", float(np.max(np.abs(A1[:, n_valid]))))
+            print("max|A2| =", float(np.max(np.abs(A2[:, n_valid]))))
+            print("max|Yh| =", float(np.max(np.abs(Yh[:, n_valid]))))
 
         # ---------- loss on valid ----------
-        err = Yh[:, n_valid] - Y[:, n_valid]
-        mse = np.mean(err ** 2)
-
-        p_ref = np.mean(Y[0, n_valid] ** 2 + Y[1, n_valid] ** 2) + 1e-15
+        err = Yh[:, n_valid] - Y[:, n_valid]  # (2, N_valid)
+        mse = np.mean(err ** 2)               # mean over 2*N_valid
+        p_ref = np.mean(Y[:, n_valid] ** 2) + 1e-15
         nmse = mse / p_ref
 
         if (ep + 1) % print_every == 0 or ep == 0:
             print(f"Epoch {ep+1:4d} | MSE={10*np.log10(mse+1e-15):.2f} dB | NMSE={10*np.log10(nmse+1e-15):.2f} dB")
 
         # ---------- backprop ----------
+        # For mse = mean(err^2) over 2*N_valid => dL/dYh = err / N_valid
         dYh = np.zeros_like(Yh)
-        dY = err / N_valid
-        dYh[:, n_valid] = dY
+        dYh[:, n_valid] = err / N_valid
 
+        # ---- Out ----
         dWout = dYh @ A2.T
         dbout = np.sum(dYh, axis=1, keepdims=True)
 
@@ -176,14 +191,14 @@ def cnn_dpd(sig_clean: np.ndarray, sig_distorted: np.ndarray, prm: dict):
         dAc = W1.T @ dZ1
         dZc = dAc * _drelu(Zc)
 
-        dbc = np.sum(dZc[:, n_valid], axis=1, keepdims=True) / N_valid
+        dbc = np.sum(dZc[:, n_valid], axis=1, keepdims=True)
 
         dWc = np.zeros_like(Wc)
-        dz = dZc[:, n_valid]  # (F,N_valid)
+        dz = dZc[:, n_valid]  # (F, N_valid)
         for k in range(K):
             idx = n_valid - k
-            Xslice = Xy[:, idx]            # (C, N_valid)
-            dWc[:, k, :] = (dz @ Xslice.T) / N_valid
+            Xslice = Xy[:, idx]          # (C, N_valid)
+            dWc[:, k, :] = dz @ Xslice.T  # (F,C)
 
         # ---------- weight decay ----------
         if weight_decay > 0.0:
@@ -207,11 +222,17 @@ def cnn_dpd(sig_clean: np.ndarray, sig_distorted: np.ndarray, prm: dict):
         Wc -= lr * dWc
         bc -= lr * dbc
 
+        # ---------- numeric safety ----------
+        if not (np.isfinite(Wc).all() and np.isfinite(W1).all() and np.isfinite(W2).all() and np.isfinite(Wout).all()):
+            raise FloatingPointError("NaN/Inf in weights. Reduce lr and/or enable clip/weight_decay.")
+
     print("Generating predistorted signal (apply g to clean input)...")
 
-    # ---------- apply g to x (predistorter) ----------
-    Xx = _make_feature_channels(x, features)     # (C,N)
-    Xx = Xx / feat_rms                           # IMPORTANT: same normalization as training
+    # ----------------------------
+    # Apply g to x (predistorter)
+    # ----------------------------
+    Xx = _make_feature_channels(x, features)   # (C,N)
+    Xx = Xx / feat_rms                         # same normalization as training
 
     Zc_dpd = np.zeros((F, N), dtype=np.float64)
     for k in range(K):
@@ -222,27 +243,27 @@ def cnn_dpd(sig_clean: np.ndarray, sig_distorted: np.ndarray, prm: dict):
 
     Z1_dpd = W1 @ Ac_dpd + b1
     A1_dpd = _relu(Z1_dpd)
-    
-    print(np.max(np.abs(Zc_dpd))) 
-    print(np.max(np.abs(A1_dpd)))
 
     Z2_dpd = W2 @ A1_dpd + b2
     A2_dpd = _relu(Z2_dpd)
 
-    Y_dpd = Wout @ A2_dpd + bout
+    Y_dpd = Wout @ A2_dpd + bout  # (2,N)
 
     x_dpd_n = Y_dpd[0, :] + 1j * Y_dpd[1, :]
-    sig_predist = x_dpd_n * scale
+    sig_predist = x_dpd_n #* scale
+
 
     model = {
-        'Wc': Wc, 'bc': bc,
-        'W1': W1, 'b1': b1,
-        'W2': W2, 'b2': b2,
-        'Wout': Wout, 'bout': bout,
-        'memory': M, 'kernel': K, 'filters': F,
-        'features': features,
-        'feat_rms': feat_rms,
-        'scale': scale
+        "Wc": Wc, "bc": bc,
+        "W1": W1, "b1": b1,
+        "W2": W2, "b2": b2,
+        "Wout": Wout, "bout": bout,
+        "memory": M, "kernel": K, "filters": F,
+        "features": features,
+        "feat_rms": feat_rms,
+        "scale": scale,
+        "lr": lr,
+        "epochs": epochs,
     }
 
     return sig_predist, model

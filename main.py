@@ -7,17 +7,18 @@ from amp_model import amp_model
 
 from ls_alg import align_by_xcorr, ls_postdistorter_coeffs, apply_predistorter, nmse_db, nmse_db_gain_aligned
 from cnn_dpd import cnn_dpd
+from lms_alg import lms_postdistorter_coeffs
 
 def main():
     plt.close('all')
 
     # -----------------------------
-    # Choose method: "ls" or "cnn"
+    # Choose method: "ls" or "lms" or "cnn"
     # -----------------------------
-    method = "ls"   
+    method = "cnn"   
 
     prm = {
-        'sizeSig': int(2e4),
+        'sizeSig': int(1e4),
         'txFs': 100e6,
         'sigBand': 20e6,
         'up': 4
@@ -25,15 +26,19 @@ def main():
 
     # CNN params (используются только если method == "cnn")
     prm['cnn'] = {
-        'memory': 5,
-        'epochs': 500,
-        'lr': 1e-2,
+        'memory': 1,
+        'kernel': 5,        
+        'epochs': 5000,
+        'lr': 5e-1,         
         'M1': 16,
         'M2': 16,
         'filters': 8,
         'seed': 42,
-        'monitor': False,
-        'print_every': 1
+        'features': 'poly',
+        'print_every': 10,
+        'clip': 0.0,
+        'weight_decay': 0.0,
+        'debug_stats': False
     }
 
     # -----------------------------
@@ -44,6 +49,7 @@ def main():
 
     # PA output (no DPD)
     y = amp_model(prm, x)
+    y = y / (np.max(np.abs(y)) + 1e-15)
 
     # Align (полезно, особенно если up>1 и фильтры)
     x_al, y_al, lag = align_by_xcorr(x, y, max_lag=300)
@@ -57,8 +63,20 @@ def main():
         ridge = 1e-6
         a = ls_postdistorter_coeffs(y_al, x_al, orders=orders, ridge=ridge)
         x_dpd = apply_predistorter(x_al, a, orders=orders)
-        model = {'a': a, 'orders': orders, 'ridge': ridge}
+        model = {'a': a, 'orders': orders, 'ridge': ridge}    
+    elif method.lower() == "lms":
+        orders = (1, 3, 5)
+        mu = 1e-2          # для чистого LMS начни с 1e-6..1e-5
+        epochs = 3         # 1..10, можно увеличить для приближения к LS
 
+        a = lms_postdistorter_coeffs(
+            y_al, x_al,
+            orders=orders,
+            mu=mu,
+            epochs=epochs
+        )
+        x_dpd = apply_predistorter(x_al, a, orders=orders)
+        model = {'a': a, 'orders': orders, 'mu': mu, 'epochs': epochs}
     elif method.lower() == "cnn":
         # IMPORTANT: cnn_dpd expects (clean, distorted) in the same time alignment
         # We already aligned x_al, y_al, so pass those.
@@ -68,7 +86,7 @@ def main():
         # x_dpd = x_dpd / (np.max(np.abs(x_dpd)) + 1e-15)
 
     else:
-        raise ValueError('method must be "ls" or "cnn"')
+        raise ValueError('method must be "ls" or "lms" or "cnn"')
     
     p_ref = np.mean(np.abs(x_al)**2)
     p_dpd = np.mean(np.abs(x_dpd)**2) + 1e-15
