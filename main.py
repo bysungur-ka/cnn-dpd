@@ -26,10 +26,10 @@ def main():
 
     # CNN params (используются только если method == "cnn")
     prm['cnn'] = {
-        'memory': 1,
+        'memory': 5,
         'kernel': 5,        
-        'epochs': 5000,
-        'lr': 5e-1,         
+        'epochs': 1000,
+        'lr': 5e-3,         
         'M1': 16,
         'M2': 16,
         'filters': 8,
@@ -38,18 +38,45 @@ def main():
         'print_every': 10,
         'clip': 0.0,
         'weight_decay': 0.0,
-        'debug_stats': False
+        'debug_stats': False,
+        'ila_iters': 20,
+        'warm_start': False
     }
+    
+    prm['cnn'].update({
+    'kernel': 5,
+    'filters': 16,
+    'M1': 64,
+    'M2': 64,
+    'epochs': 2000,
+    'lr': 1e-3,
+    'print_every': 50,
+    'features': 'poly',
+    'grad_clip': 1.0,
+    'device': 'auto',
+    })
+    
+    prm['pa_alpha'] = 0.8
+    prm['pa_memory'] = 3
+    prm['mem_decay'] = 0.7
+    prm['gmp_k'] = 2
+    prm['gmp_beta'] = 0.15
 
     # -----------------------------
     # Generate + normalize reference
     # -----------------------------
     sig = generator(prm)
     x = sig / (np.max(np.abs(sig)) + 1e-15)
-
-    # PA output (no DPD)
+    
+    # PA modeling
     y = amp_model(prm, x)
+    ampGain = np.sqrt(np.mean(np.abs(y)**2) / np.mean(np.abs(x)**2))    
     y = y / (np.max(np.abs(y)) + 1e-15)
+    
+    prm['cnn'] = {
+        'ampGain': ampGain
+    }
+    
 
     # Align (полезно, особенно если up>1 и фильтры)
     x_al, y_al, lag = align_by_xcorr(x, y, max_lag=300)
@@ -67,7 +94,7 @@ def main():
     elif method.lower() == "lms":
         orders = (1, 3, 5)
         mu = 1e-2          # для чистого LMS начни с 1e-6..1e-5
-        epochs = 3         # 1..10, можно увеличить для приближения к LS
+        epochs = 100         # 1..10, можно увеличить для приближения к LS
 
         a = lms_postdistorter_coeffs(
             y_al, x_al,
