@@ -107,6 +107,8 @@ def main():
     # -----------------------------
     x_al, y_al, lag = align_by_xcorr(x, y, max_lag=300)
     print(f"Alignment lag = {lag} samples. Using aligned length = {len(x_al)}")
+    
+    
 
     # -----------------------------
     # DPD
