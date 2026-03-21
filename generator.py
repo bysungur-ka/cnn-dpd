@@ -27,7 +27,7 @@ def generator(prm):
     # 2) Baseband lowpass FIR (remez)
     # -----------------------------
     inBbFirSlopeMarg = 0.2
-    Fpass = sigBand / txFs                 # normalized to Fs
+    Fpass = sigBand / (2*txFs)                 # normalized to Fs
     Fstop = Fpass * (1 + inBbFirSlopeMarg)
 
     # remez expects bands in [0, 0.5] when fs=1.0 (Nyquist=0.5)

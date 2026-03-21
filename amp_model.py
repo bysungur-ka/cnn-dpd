@@ -18,7 +18,7 @@ def amp_model(prm, x):
     c3 = -23.0954 + 1j * 4.968
     c5 = 21.3936 + 1j * 0.4305
 
-    alpha = float(prm.get('pa_alpha', 0.3))
+    alpha = float(prm.get('pa_alpha', 0.7))
     M = int(prm.get('pa_memory', 3))
 
     # GMP-lite cross-term controls
