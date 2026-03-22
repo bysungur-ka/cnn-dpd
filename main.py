@@ -14,105 +14,51 @@ from ls_alg import (
 )
 from lms_alg import lms_postdistorter_coeffs
 
-# === CNN imports ===
-# 1) numpy version (как у тебя сейчас)
 from cnn_dpd import cnn_dpd
-
 from cnn_dpd_torch import cnn_dpd_torch
-HAS_TORCH_CNN = True
 
 
-def main():
-    plt.close('all')
-
-    # -----------------------------
-    # Choose method: "ls" or "lms" or "cnn"
-    # -----------------------------
-    method = "cnn"
-
-    # if method == "cnn": choose implementation
-    # "numpy" -> cnn_dpd from cnn_dpd.py
-    # "torch" -> cnn_dpd_torch from cnn_dpd_torch.py (if exists)
-    cnn_backend = "torch"  # "numpy" or "torch"
-
+def build_params():
     prm = {
         'sizeSig': int(2e4),
         'txFs': 100e6,
         'sigBand': 20e6,
-        'up': 4
+        'up': 4,
+
+        # PA params
+        'pa_alpha': 0.8,
+        'pa_memory': 3,
+        'mem_decay': 0.7,
+        'gmp_k': 2,
+        'gmp_beta': 0.15,
     }
 
-    # -----------------------------
-    # CNN params
-    # -----------------------------
     prm['cnn'] = {
         'memory': 5,
-        'kernel': 5,
-        'epochs': 1000,
-        'lr': 1e-3,
-        'M1': 16,
-        'M2': 16,
-        'filters': 8,
-        'seed': 42,
-        'features': 'poly',
-        'print_every': 10,
-        'clip': 0.0,            # numpy code likely uses this
-        'weight_decay': 0.0,
-        'debug_stats': False,
-        'ila_iters': 10,
-        'warm_start': True
-    }
-
-    prm['cnn'].update({
         'kernel': 5,
         'filters': 8,
         'M1': 16,
         'M2': 16,
         'epochs': 50,
         'lr': 5e-3,
-        'print_every': 10,
+        'seed': 42,
         'features': 'poly',
-        'grad_clip': 1.0,   # torch code might use this
+        'print_every': 10,
+        'clip': 1.0,
+        'weight_decay': 0.0,
+        'ila_iters': 10,
+        'warm_start': True,
+        'batch_size': 4096,
+        'batch_mode': 'contig',
+        'residual': False,
+        'power_constraint': False,
         'device': 'cpu',
-    })
+    }
 
-    # keep backward compatibility: if some code expects 'clip'
-    if 'grad_clip' in prm['cnn'] and ('clip' not in prm['cnn'] or prm['cnn']['clip'] == 0.0):
-        prm['cnn']['clip'] = prm['cnn']['grad_clip']
+    return prm
 
-    # -----------------------------
-    # PA params
-    # -----------------------------
-    prm['pa_alpha'] = 0.8
-    prm['pa_memory'] = 3
-    prm['mem_decay'] = 0.7
-    prm['gmp_k'] = 2
-    prm['gmp_beta'] = 0.15
 
-    # -----------------------------
-    # Generate + normalize reference
-    # -----------------------------
-    sig = generator(prm)
-    x = sig / (np.max(np.abs(sig)) + 1e-15)
-
-    # PA modeling
-    y = amp_model(prm, x)
-    ampGain = np.sqrt(np.mean(np.abs(y)**2) / (np.mean(np.abs(x)**2) + 1e-15))
-    #y = y / (np.max(np.abs(y)) + 1e-15)
-
-    prm['cnn']['ampGain'] = float(ampGain)
-
-    # -----------------------------
-    # Align
-    # -----------------------------
-    x_al, y_al, lag = align_by_xcorr(x, y, max_lag=300)
-    print(f"Alignment lag = {lag} samples. Using aligned length = {len(x_al)}")
-    
-    
-
-    # -----------------------------
-    # DPD
-    # -----------------------------
+def run_dpd(method, cnn_backend, x_al, y_al, prm):
     if method.lower() == "ls":
         orders = (1, 3, 5)
         ridge = 1e-6
@@ -136,63 +82,54 @@ def main():
 
     elif method.lower() == "cnn":
         if cnn_backend == "torch":
-            if not HAS_TORCH_CNN:
-                raise ImportError("cnn_backend='torch', but cnn_dpd_torch.py not found/import failed.")
-            x_dpd, model = cnn_dpd_torch(x_al, y_al, prm, pa_fn=lambda z: amp_model(prm, z))
-        else:
+            x_dpd, model = cnn_dpd_torch(
+                x_al,
+                y_al,
+                prm,
+                pa_fn=lambda z: amp_model(prm, z)
+            )
+        elif cnn_backend == "numpy":
             x_dpd, model = cnn_dpd(x_al, y_al, prm)
+        else:
+            raise ValueError('cnn_backend must be "torch" or "numpy"')
 
     else:
         raise ValueError('method must be "ls" or "lms" or "cnn"')
 
-    # -----------------------------
-    # (оставляю твой power check как есть)
-    # -----------------------------
-    p_ref = np.mean(np.abs(x_al)**2)
-    p_dpd = np.mean(np.abs(x_dpd)**2) + 1e-15
-    # x_dpd = x_dpd * np.sqrt(p_ref / p_dpd)
+    return x_dpd, model
 
-    # PA output after DPD
-    y_lin = amp_model(prm, x_dpd)
 
-    # -----------------------------
-    # Metrics (NMSE to x_al)
-    # -----------------------------
-    nmse_before = nmse_db_gain_aligned(y_al, x_al)
-    nmse_after  = nmse_db_gain_aligned(y_lin, x_al)
-    print(f"Gain-aligned NMSE before DPD: {nmse_before:.2f} dB")
-    print(f"Gain-aligned NMSE after  DPD: {nmse_after:.2f} dB")
-
-    # -----------------------------
-    # PSD plot (Welch)
-    # -----------------------------
-    fs = prm['txFs'] * prm['up']
-
-    f, Pxx_before = signal.welch(
-        y_al, fs=fs, window='hann', nperseg=4096, noverlap=2048,
-        return_onesided=False, scaling='density'
-    )
-    _, Pxx_after = signal.welch(
-        y_lin, fs=fs, window='hann', nperseg=4096, noverlap=2048,
-        return_onesided=False, scaling='density'
+def welch_psd_db(x, fs, nperseg=4096, noverlap=2048):
+    f, Pxx = signal.welch(
+        x,
+        fs=fs,
+        window='hann',
+        nperseg=nperseg,
+        noverlap=noverlap,
+        return_onesided=False,
+        scaling='density'
     )
 
-    Pxx_before = np.fft.fftshift(Pxx_before)
-    Pxx_after = np.fft.fftshift(Pxx_after)
+    Pxx = np.fft.fftshift(Pxx)
     f = np.fft.fftshift(f)
 
-    center = len(Pxx_before) // 2
+    center = len(Pxx) // 2
     if center > 0:
-        Pxx_before[center] = Pxx_before[center - 1]
-        Pxx_after[center] = Pxx_after[center - 1]
+        Pxx[center] = Pxx[center - 1]
 
-    PxxB_db = 10*np.log10(Pxx_before/(np.max(Pxx_before) + 1e-15) + 1e-15)
-    PxxA_db = 10*np.log10(Pxx_after /(np.max(Pxx_after) + 1e-15) + 1e-15)
+    Pxx_db = 10 * np.log10(Pxx / (np.max(Pxx) + 1e-15) + 1e-15)
+    return f, Pxx_db
 
-    plt.rcParams['font.family'] = 'DejaVu Sans'
+
+def plot_output_psd(y_before, y_after, prm):
+    fs = prm['txFs'] * prm['up']
+
+    f, PxxB_db = welch_psd_db(y_before, fs=fs)
+    _, PxxA_db = welch_psd_db(y_after, fs=fs)
+
     plt.figure()
-    plt.plot(f / 1e6, PxxB_db, 'r', linewidth=1.5, label='До DPD')
-    plt.plot(f / 1e6, PxxA_db, 'b', linewidth=1.5, label=f'После DPD')
+    plt.plot(f / 1e6, PxxB_db, linewidth=1.5, label='До DPD')
+    plt.plot(f / 1e6, PxxA_db, linewidth=1.5, label='После DPD')
     plt.xlabel('Частота, МГц')
     plt.ylabel('Спектральная плотность мощности, дБ')
     plt.title('Спектральная плотность мощности на выходе усилителя')
@@ -201,11 +138,222 @@ def main():
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.show()
-    
+
+
+def gain_align(y, x):
+    denom = np.vdot(x, x) + 1e-15
+    G = np.vdot(x, y) / denom
+    y_al = y / (G + 1e-15)
+    return y_al, G
+
+
+def binned_mean(x, y, n_bins=120, min_count=20):
+    x = np.asarray(x)
+    y = np.asarray(y)
+
+    x_min = np.min(x)
+    x_max = np.max(x)
+
+    if x_max <= x_min:
+        return x, y
+
+    edges = np.linspace(x_min, x_max, n_bins + 1)
+    idx = np.digitize(x, edges) - 1
+
+    xb = []
+    yb = []
+
+    for k in range(n_bins):
+        m = idx == k
+        if np.count_nonzero(m) < min_count:
+            continue
+        xb.append(np.mean(x[m]))
+        yb.append(np.mean(y[m]))
+
+    return np.asarray(xb), np.asarray(yb)
+
+
+def binned_circular_mean_deg(x, phi_deg, n_bins=120, min_count=20):
+    x = np.asarray(x)
+    phi = np.deg2rad(np.asarray(phi_deg))
+
+    x_min = np.min(x)
+    x_max = np.max(x)
+
+    if x_max <= x_min:
+        return x, np.rad2deg(phi)
+
+    edges = np.linspace(x_min, x_max, n_bins + 1)
+    idx = np.digitize(x, edges) - 1
+
+    xb = []
+    yb = []
+
+    for k in range(n_bins):
+        m = idx == k
+        if np.count_nonzero(m) < min_count:
+            continue
+
+        xb.append(np.mean(x[m]))
+        yb.append(np.rad2deg(np.angle(np.mean(np.exp(1j * phi[m])))))
+
+    return np.asarray(xb), np.asarray(yb)
+
+
+def plot_amam_ampm(x_ref, y_before, y_after):
+    # Gain-aligned outputs relative to reference input
+    yb_al, _ = gain_align(y_before, x_ref)
+    ya_al, _ = gain_align(y_after, x_ref)
+
+    a_in = np.abs(x_ref)
+    a_out_before = np.abs(yb_al)
+    a_out_after = np.abs(ya_al)
+
+    # phase error relative to reference input
+    phi_before = np.angle(yb_al * np.conj(x_ref), deg=True)
+    phi_after = np.angle(ya_al * np.conj(x_ref), deg=True)
+
+    # mask low-amplitude points for phase plot
+    thr = 0.05 * np.max(a_in)
+    mask_phi = a_in > thr
+
+    x_amam_b, y_amam_b = binned_mean(a_in, a_out_before, n_bins=120, min_count=20)
+    x_amam_a, y_amam_a = binned_mean(a_in, a_out_after, n_bins=120, min_count=20)
+
+    x_ampm_b, y_ampm_b = binned_circular_mean_deg(
+        a_in[mask_phi], phi_before[mask_phi], n_bins=100, min_count=20
+    )
+    x_ampm_a, y_ampm_a = binned_circular_mean_deg(
+        a_in[mask_phi], phi_after[mask_phi], n_bins=100, min_count=20
+    )
+
+    fig, ax = plt.subplots(1, 2, figsize=(12, 5))
+
+    # AM/AM
+    ax[0].plot(x_amam_b, y_amam_b, linewidth=2.0, label='До DPD')
+    ax[0].plot(x_amam_a, y_amam_a, linewidth=2.0, label='После DPD')
+
+    lim = max(np.max(a_in), np.max(a_out_before), np.max(a_out_after))
+    ax[0].plot([0, lim], [0, lim], '--', linewidth=1.0, label='Идеальная линейность')
+
+    ax[0].set_xlabel('Амплитуда входного сигнала')
+    ax[0].set_ylabel('Амплитуда выходного сигнала')
+    ax[0].set_title('AM/AM характеристика')
+    ax[0].grid(True)
+    ax[0].legend()
+
+    # AM/PM
+    ax[1].plot(x_ampm_b, y_ampm_b, linewidth=2.0, label='До DPD')
+    ax[1].plot(x_ampm_a, y_ampm_a, linewidth=2.0, label='После DPD')
+    ax[1].axhline(0.0, linestyle='--', linewidth=1.0, label='Идеальная линейность')
+
+    ax[1].set_xlabel('Амплитуда входного сигнала')
+    ax[1].set_ylabel('Фазовая ошибка, градусы')
+    ax[1].set_title('AM/PM характеристика')
+    ax[1].grid(True)
+    ax[1].legend()
+
+    fig.suptitle('Амплитудно-амплитудная и амплитудно-фазовая характеристики каскада')
+    fig.tight_layout()
+
+
+def plot_ila_history(model):
+    if not isinstance(model, dict):
+        return
+
+    nmse_train = np.asarray(model.get('nmse_train_hist_db', []), dtype=float)
+    nmse_after = np.asarray(model.get('nmse_after_hist_db', []), dtype=float)
+
+    if nmse_train.size == 0 and nmse_after.size == 0:
+        return
+
+    plt.figure()
+
+    if nmse_train.size > 0:
+        plt.plot(
+            np.arange(1, len(nmse_train) + 1),
+            nmse_train,
+            marker='o',
+            linewidth=1.5,
+            label='Train NMSE(u)'
+        )
+
+    if nmse_after.size > 0:
+        plt.plot(
+            np.arange(1, len(nmse_after) + 1),
+            nmse_after,
+            marker='s',
+            linewidth=1.5,
+            label='After-PA NMSE(x_ref)'
+        )
+
+    plt.xlabel('Номер итерации ILA')
+    plt.ylabel('NMSE, дБ')
+    plt.title('Сходимость по итерациям ILA')
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+
+
+def main():
+    plt.close('all')
+    plt.rcParams['font.family'] = 'DejaVu Sans'
+
+    # -----------------------------
+    # Choose method
+    # -----------------------------
+    method = "cnn"
+    cnn_backend = "torch"   # "torch" or "numpy"
+
+    prm = build_params()
+
+    # -----------------------------
+    # Generate + normalize reference
+    # -----------------------------
+    sig = generator(prm)
+    x = sig / (np.max(np.abs(sig)) + 1e-15)
+
+    # -----------------------------
+    # PA output before DPD
+    # -----------------------------
+    y = amp_model(prm, x)
+
+    # -----------------------------
+    # Align
+    # -----------------------------
+    x_al, y_al, lag = align_by_xcorr(x, y, max_lag=300)
+    print(f"Alignment lag = {lag} samples. Using aligned length = {len(x_al)}")
+
+    # -----------------------------
+    # DPD
+    # -----------------------------
+    x_dpd, model = run_dpd(method, cnn_backend, x_al, y_al, prm)
+
+    # -----------------------------
+    # PA output after DPD
+    # -----------------------------
+    y_lin = amp_model(prm, x_dpd)
+
+    # -----------------------------
+    # Metrics
+    # -----------------------------
+    nmse_before = nmse_db_gain_aligned(y_al, x_al)
+    nmse_after = nmse_db_gain_aligned(y_lin, x_al)
+
+    print(f"Gain-aligned NMSE before DPD: {nmse_before:.2f} dB")
+    print(f"Gain-aligned NMSE after  DPD: {nmse_after:.2f} dB")
+
+    # -----------------------------
+    # PSD plot
+    # -----------------------------
+    plot_output_psd(y_al, y_lin, prm)
+
+    # -----------------------------
+    # ACLR plot + metrics
+    # -----------------------------
     fs = prm['txFs'] * prm['up']
     bw_aclr = prm['sigBand'] + 5e6
-    
+
     fig, ax, met = plot_aclr_nr_style(
         x_before=y_al,
         x_after=y_lin,
@@ -217,20 +365,30 @@ def main():
         ylim_db=(-70, 5),
         title='ACLR для сигнала на выходе усилителя'
     )
-    
+
     print("До DPD:")
     print(f"  ACLR(-1) = {met['before']['aclr_m1_db']:.2f} dB")
     print(f"  ACLR(+1) = {met['before']['aclr_p1_db']:.2f} dB")
     print(f"  Leakage(-1) = {met['before']['leak_m1_dbc']:.2f} dBc")
     print(f"  Leakage(+1) = {met['before']['leak_p1_dbc']:.2f} dBc")
-    
+
     print("После DPD:")
     print(f"  ACLR(-1) = {met['after']['aclr_m1_db']:.2f} dB")
     print(f"  ACLR(+1) = {met['after']['aclr_p1_db']:.2f} dB")
     print(f"  Leakage(-1) = {met['after']['leak_m1_dbc']:.2f} dBc")
     print(f"  Leakage(+1) = {met['after']['leak_p1_dbc']:.2f} dBc")
-    
-    plt.show() 
+
+    # -----------------------------
+    # AM/AM and AM/PM
+    # -----------------------------
+    plot_amam_ampm(x_al, y_al, y_lin)
+
+    # -----------------------------
+    # Optional: ILA convergence history for torch CNN
+    # -----------------------------
+    plot_ila_history(model)
+
+    plt.show()
 
 
 if __name__ == "__main__":
