@@ -38,7 +38,6 @@ def build_params():
         'kernel': 5,
         'filters': 8,
         'M1': 16,
-        'M2': 16,
         'epochs': 50,
         'lr': 5e-3,
         'seed': 42,
