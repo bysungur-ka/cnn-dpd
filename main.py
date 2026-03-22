@@ -36,9 +36,8 @@ def build_params():
     prm['cnn'] = {
         'memory': 5,
         'kernel': 5,
-        'filters': 8,
+        'filters': 6,
         'M1': 16,
-        'M2': 16,
         'epochs': 50,
         'lr': 5e-3,
         'seed': 42,
