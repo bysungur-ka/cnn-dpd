@@ -147,61 +147,11 @@ def gain_align(y, x):
     return y_al, G
 
 
-def binned_mean(x, y, n_bins=120, min_count=20):
-    x = np.asarray(x)
-    y = np.asarray(y)
-
-    x_min = np.min(x)
-    x_max = np.max(x)
-
-    if x_max <= x_min:
-        return x, y
-
-    edges = np.linspace(x_min, x_max, n_bins + 1)
-    idx = np.digitize(x, edges) - 1
-
-    xb = []
-    yb = []
-
-    for k in range(n_bins):
-        m = idx == k
-        if np.count_nonzero(m) < min_count:
-            continue
-        xb.append(np.mean(x[m]))
-        yb.append(np.mean(y[m]))
-
-    return np.asarray(xb), np.asarray(yb)
-
-
-def binned_circular_mean_deg(x, phi_deg, n_bins=120, min_count=20):
-    x = np.asarray(x)
-    phi = np.deg2rad(np.asarray(phi_deg))
-
-    x_min = np.min(x)
-    x_max = np.max(x)
-
-    if x_max <= x_min:
-        return x, np.rad2deg(phi)
-
-    edges = np.linspace(x_min, x_max, n_bins + 1)
-    idx = np.digitize(x, edges) - 1
-
-    xb = []
-    yb = []
-
-    for k in range(n_bins):
-        m = idx == k
-        if np.count_nonzero(m) < min_count:
-            continue
-
-        xb.append(np.mean(x[m]))
-        yb.append(np.rad2deg(np.angle(np.mean(np.exp(1j * phi[m])))))
-
-    return np.asarray(xb), np.asarray(yb)
+def _scatter_stride(n, max_points=25000):
+    return max(1, int(np.ceil(n / max_points)))
 
 
 def plot_amam_ampm(x_ref, y_before, y_after):
-    # Gain-aligned outputs relative to reference input
     yb_al, _ = gain_align(y_before, x_ref)
     ya_al, _ = gain_align(y_after, x_ref)
 
@@ -209,29 +159,33 @@ def plot_amam_ampm(x_ref, y_before, y_after):
     a_out_before = np.abs(yb_al)
     a_out_after = np.abs(ya_al)
 
-    # phase error relative to reference input
     phi_before = np.angle(yb_al * np.conj(x_ref), deg=True)
     phi_after = np.angle(ya_al * np.conj(x_ref), deg=True)
 
-    # mask low-amplitude points for phase plot
-    thr = 0.05 * np.max(a_in)
-    mask_phi = a_in > thr
+    # Для AM/PM отбрасываем слишком малые амплитуды
+    thr_phi = 0.05 * np.max(a_in)
+    mask_phi = a_in > thr_phi
 
-    x_amam_b, y_amam_b = binned_mean(a_in, a_out_before, n_bins=120, min_count=20)
-    x_amam_a, y_amam_a = binned_mean(a_in, a_out_after, n_bins=120, min_count=20)
-
-    x_ampm_b, y_ampm_b = binned_circular_mean_deg(
-        a_in[mask_phi], phi_before[mask_phi], n_bins=100, min_count=20
-    )
-    x_ampm_a, y_ampm_a = binned_circular_mean_deg(
-        a_in[mask_phi], phi_after[mask_phi], n_bins=100, min_count=20
-    )
+    stride_am = _scatter_stride(len(a_in), max_points=30000)
+    stride_pm = _scatter_stride(np.count_nonzero(mask_phi), max_points=30000)
 
     fig, ax = plt.subplots(1, 2, figsize=(12, 5))
 
     # AM/AM
-    ax[0].plot(x_amam_b, y_amam_b, linewidth=2.0, label='До DPD')
-    ax[0].plot(x_amam_a, y_amam_a, linewidth=2.0, label='После DPD')
+    ax[0].scatter(
+        a_in[::stride_am],
+        a_out_before[::stride_am],
+        s=10,
+        alpha=0.45,
+        label='До DPD'
+    )
+    ax[0].scatter(
+        a_in[::stride_am],
+        a_out_after[::stride_am],
+        s=10,
+        alpha=0.45,
+        label='После DPD'
+    )
 
     lim = max(np.max(a_in), np.max(a_out_before), np.max(a_out_after))
     ax[0].plot([0, lim], [0, lim], '--', linewidth=1.0, label='Идеальная линейность')
@@ -243,8 +197,24 @@ def plot_amam_ampm(x_ref, y_before, y_after):
     ax[0].legend()
 
     # AM/PM
-    ax[1].plot(x_ampm_b, y_ampm_b, linewidth=2.0, label='До DPD')
-    ax[1].plot(x_ampm_a, y_ampm_a, linewidth=2.0, label='После DPD')
+    a_in_phi = a_in[mask_phi][::stride_pm]
+    phi_b = phi_before[mask_phi][::stride_pm]
+    phi_a = phi_after[mask_phi][::stride_pm]
+
+    ax[1].scatter(
+        a_in_phi,
+        phi_b,
+        s=10,
+        alpha=0.45,
+        label='До DPD'
+    )
+    ax[1].scatter(
+        a_in_phi,
+        phi_a,
+        s=10,
+        alpha=0.45,
+        label='После DPD'
+    )
     ax[1].axhline(0.0, linestyle='--', linewidth=1.0, label='Идеальная линейность')
 
     ax[1].set_xlabel('Амплитуда входного сигнала')
@@ -257,39 +227,71 @@ def plot_amam_ampm(x_ref, y_before, y_after):
     fig.tight_layout()
 
 
+def plot_gain_vs_input(x_ref, y_before, y_after):
+    yb_al, _ = gain_align(y_before, x_ref)
+    ya_al, _ = gain_align(y_after, x_ref)
+
+    eps = 1e-15
+
+    pin_db = 20 * np.log10(np.abs(x_ref) + eps)
+    pout_before_db = 20 * np.log10(np.abs(yb_al) + eps)
+    pout_after_db = 20 * np.log10(np.abs(ya_al) + eps)
+
+    gain_before_db = pout_before_db - pin_db
+    gain_after_db = pout_after_db - pin_db
+
+    thr = 0.02 * np.max(np.abs(x_ref))
+    mask = np.abs(x_ref) > thr
+
+    pin_db = pin_db[mask]
+    gain_before_db = gain_before_db[mask]
+    gain_after_db = gain_after_db[mask]
+
+    stride = _scatter_stride(len(pin_db), max_points=30000)
+
+    plt.figure(figsize=(6, 5))
+    plt.scatter(
+        pin_db[::stride],
+        gain_before_db[::stride],
+        s=10,
+        alpha=0.45,
+        label='До DPD'
+    )
+    plt.scatter(
+        pin_db[::stride],
+        gain_after_db[::stride],
+        s=10,
+        alpha=0.45,
+        label='После DPD'
+    )
+    plt.axhline(0.0, linestyle='--', linewidth=1.0, label='Идеально постоянное усиление')
+    plt.xlabel('Уровень входного сигнала, дБ')
+    plt.ylabel('Коэффициент усиления, дБ')
+    plt.title('Gain vs Input Level')
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+
+
 def plot_ila_history(model):
     if not isinstance(model, dict):
         return
 
-    nmse_train = np.asarray(model.get('nmse_train_hist_db', []), dtype=float)
     nmse_after = np.asarray(model.get('nmse_after_hist_db', []), dtype=float)
-
-    if nmse_train.size == 0 and nmse_after.size == 0:
+    if nmse_after.size == 0:
         return
 
     plt.figure()
-
-    if nmse_train.size > 0:
-        plt.plot(
-            np.arange(1, len(nmse_train) + 1),
-            nmse_train,
-            marker='o',
-            linewidth=1.5,
-            label='Train NMSE(u)'
-        )
-
-    if nmse_after.size > 0:
-        plt.plot(
-            np.arange(1, len(nmse_after) + 1),
-            nmse_after,
-            marker='s',
-            linewidth=1.5,
-            label='After-PA NMSE(x_ref)'
-        )
-
+    plt.plot(
+        np.arange(1, len(nmse_after) + 1),
+        nmse_after,
+        marker='o',
+        linewidth=1.8,
+        label='NMSE'
+    )
     plt.xlabel('Номер итерации ILA')
     plt.ylabel('NMSE, дБ')
-    plt.title('Сходимость по итерациям ILA')
+    plt.title('Сходимость ILA по системной метрике NMSE')
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
@@ -379,12 +381,13 @@ def main():
     print(f"  Leakage(+1) = {met['after']['leak_p1_dbc']:.2f} dBc")
 
     # -----------------------------
-    # AM/AM and AM/PM
+    # Characteristics
     # -----------------------------
     plot_amam_ampm(x_al, y_al, y_lin)
+    plot_gain_vs_input(x_al, y_al, y_lin)
 
     # -----------------------------
-    # Optional: ILA convergence history for torch CNN
+    # ILA convergence
     # -----------------------------
     plot_ila_history(model)
 
