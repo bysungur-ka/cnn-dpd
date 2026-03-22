@@ -60,7 +60,7 @@ def main():
         'weight_decay': 0.0,
         'debug_stats': False,
         'ila_iters': 10,
-        'warm_start': False
+        'warm_start': True
     }
 
     prm['cnn'].update({
