@@ -1,13 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal
+from matplotlib.patches import Rectangle
 
 
-def welch_psd_db(x, fs, nperseg=4096, noverlap=2048, floor_db=-120):
-    """
-    Two-sided Welch PSD for complex baseband signal.
-    Returns frequency in Hz and PSD in dB (absolute, not normalized to each curve separately).
-    """
+def _welch_psd(x, fs, nperseg=4096, noverlap=2048):
     f, Pxx = signal.welch(
         x,
         fs=fs,
@@ -20,66 +17,18 @@ def welch_psd_db(x, fs, nperseg=4096, noverlap=2048, floor_db=-120):
     f = np.fft.fftshift(f)
     Pxx = np.fft.fftshift(Pxx)
 
-    Pxx_db = 10 * np.log10(Pxx + 1e-20)
-    Pxx_db = np.maximum(Pxx_db, floor_db)
-    return f, Pxx, Pxx_db
+    center = len(Pxx) // 2
+    if center > 0:
+        Pxx[center] = Pxx[center - 1]
+
+    return f, Pxx
 
 
-def band_power_from_psd(f, Pxx, center_hz, bw_hz):
-    """
-    Integrate PSD over rectangular band.
-    """
-    lo = center_hz - bw_hz / 2
-    hi = center_hz + bw_hz / 2
-    m = (f >= lo) & (f < hi)
-    if np.count_nonzero(m) < 2:
-        return 0.0
-    return float(np.trapezoid(Pxx[m], f[m]))
-
-
-def aclr(f, Pxx, bw):
-    """
-    3GPP-style ACLR for main channel at DC and adjacent channels centered at ±bw, ±2bw.
-    Returns positive ACLR in dB:
-        ACLR = 10*log10(P_main / P_adj)
-    """
-    P_main = band_power_from_psd(f, Pxx, 0.0, bw)
-
-    P_adj_m1 = band_power_from_psd(f, Pxx, -bw, bw)
-    P_adj_p1 = band_power_from_psd(f, Pxx, +bw, bw)
-
-    P_adj_m2 = band_power_from_psd(f, Pxx, -2 * bw, bw)
-    P_adj_p2 = band_power_from_psd(f, Pxx, +2 * bw, bw)
-
-    def safe_aclr(p_adj):
-        if p_adj <= 0 or P_main <= 0:
-            return np.inf
-        return 10 * np.log10(P_main / p_adj)
-
-    return {
-        "P_main": P_main,
-        "P_adj_m1": P_adj_m1,
-        "P_adj_p1": P_adj_p1,
-        "P_adj_m2": P_adj_m2,
-        "P_adj_p2": P_adj_p2,
-        "aclr_m1_db": safe_aclr(P_adj_m1),
-        "aclr_p1_db": safe_aclr(P_adj_p1),
-        "aclr_m2_db": safe_aclr(P_adj_m2),
-        "aclr_p2_db": safe_aclr(P_adj_p2),
-        "leak_m1_dbc": -safe_aclr(P_adj_m1),
-        "leak_p1_dbc": -safe_aclr(P_adj_p1),
-        "leak_m2_dbc": -safe_aclr(P_adj_m2),
-        "leak_p2_dbc": -safe_aclr(P_adj_p2),
-    }
-
-
-def _add_band(ax, x0_mhz, x1_mhz, label=None, alpha=0.10):
-    ax.axvspan(x0_mhz, x1_mhz, alpha=alpha)
-    if label is not None:
-        xm = 0.5 * (x0_mhz + x1_mhz)
-        ylim = ax.get_ylim()
-        y = ylim[1] - 0.06 * (ylim[1] - ylim[0])
-        ax.text(xm, y, label, ha='center', va='top', fontsize=10)
+def _band_power(f, Pxx, f1, f2):
+    mask = (f >= f1) & (f < f2)
+    if not np.any(mask):
+        return 1e-20
+    return np.trapezoid(Pxx[mask], f[mask]) + 1e-20
 
 
 def plot_aclr_nr_style(
@@ -91,106 +40,139 @@ def plot_aclr_nr_style(
     noverlap=2048,
     xlim_mhz=None,
     ylim_db=None,
-    title="Спектральная плотность мощности и полосы ACLR",
+    title='Спектральная плотность мощности и полосы ACLR',
     show_second_adjacent=True,
+    common_ref=True,
 ):
     """
-    MATLAB-like NR ACLR plot:
-    - PSD before/after
-    - main / adjacent bands highlighted
-    - ACLR values annotated
+    NR-style ACLR plot.
+
+    Parameters
+    ----------
+    x_before, x_after : complex ndarray
+        Signals before and after DPD
+    fs : float
+        Sampling frequency
+    bw : float
+        Main channel bandwidth
+    common_ref : bool
+        True  -> both spectra normalized to one common peak
+        False -> each spectrum normalized to its own peak
     """
-    f_b, Pxx_b, Pxx_b_db = welch_psd_db(x_before, fs, nperseg=nperseg, noverlap=noverlap)
-    f_a, Pxx_a, Pxx_a_db = welch_psd_db(x_after,  fs, nperseg=nperseg, noverlap=noverlap)
 
-    # Common normalization for display relative to the same reference
-    ref = max(np.max(Pxx_b), np.max(Pxx_a))
-    Pxx_b_rel_db = 10 * np.log10(Pxx_b / (ref + 1e-20) + 1e-20)
-    Pxx_a_rel_db = 10 * np.log10(Pxx_a / (ref + 1e-20) + 1e-20)
+    x_before = np.asarray(x_before, dtype=np.complex128)
+    x_after = np.asarray(x_after, dtype=np.complex128)
 
-    met_b = aclr(f_b, Pxx_b, bw)
-    met_a = aclr(f_a, Pxx_a, bw)
+    f, Pxx_b = _welch_psd(x_before, fs=fs, nperseg=nperseg, noverlap=noverlap)
+    _, Pxx_a = _welch_psd(x_after, fs=fs, nperseg=nperseg, noverlap=noverlap)
 
-    f_mhz = f_b / 1e6
-    bw_mhz = bw / 1e6
+    # Main and adjacent channels
+    main = (-bw / 2, bw / 2)
+    adj_m1 = (-3 * bw / 2, -bw / 2)
+    adj_p1 = (bw / 2, 3 * bw / 2)
 
-    plt.rcParams['font.family'] = 'DejaVu Sans'
-    fig, ax = plt.subplots(figsize=(10, 6))
+    adj_m2 = (-5 * bw / 2, -3 * bw / 2)
+    adj_p2 = (3 * bw / 2, 5 * bw / 2)
 
-    # Band highlighting
+    # Powers before
+    Pm_b = _band_power(f, Pxx_b, *main)
+    Padj_m1_b = _band_power(f, Pxx_b, *adj_m1)
+    Padj_p1_b = _band_power(f, Pxx_b, *adj_p1)
+    Padj_m2_b = _band_power(f, Pxx_b, *adj_m2)
+    Padj_p2_b = _band_power(f, Pxx_b, *adj_p2)
+
+    # Powers after
+    Pm_a = _band_power(f, Pxx_a, *main)
+    Padj_m1_a = _band_power(f, Pxx_a, *adj_m1)
+    Padj_p1_a = _band_power(f, Pxx_a, *adj_p1)
+    Padj_m2_a = _band_power(f, Pxx_a, *adj_m2)
+    Padj_p2_a = _band_power(f, Pxx_a, *adj_p2)
+
+    aclr_m1_b = 10 * np.log10(Pm_b / Padj_m1_b)
+    aclr_p1_b = 10 * np.log10(Pm_b / Padj_p1_b)
+    aclr_m2_b = 10 * np.log10(Pm_b / Padj_m2_b)
+    aclr_p2_b = 10 * np.log10(Pm_b / Padj_p2_b)
+
+    aclr_m1_a = 10 * np.log10(Pm_a / Padj_m1_a)
+    aclr_p1_a = 10 * np.log10(Pm_a / Padj_p1_a)
+    aclr_m2_a = 10 * np.log10(Pm_a / Padj_m2_a)
+    aclr_p2_a = 10 * np.log10(Pm_a / Padj_p2_a)
+
+    leak_m1_b = 10 * np.log10(Padj_m1_b / Pm_b)
+    leak_p1_b = 10 * np.log10(Padj_p1_b / Pm_b)
+    leak_m2_b = 10 * np.log10(Padj_m2_b / Pm_b)
+    leak_p2_b = 10 * np.log10(Padj_p2_b / Pm_b)
+
+    leak_m1_a = 10 * np.log10(Padj_m1_a / Pm_a)
+    leak_p1_a = 10 * np.log10(Padj_p1_a / Pm_a)
+    leak_m2_a = 10 * np.log10(Padj_m2_a / Pm_a)
+    leak_p2_a = 10 * np.log10(Padj_p2_a / Pm_a)
+
+    # Normalize PSD for plotting
+    if common_ref:
+        ref = max(np.max(Pxx_b), np.max(Pxx_a))
+        Pxx_b_rel_db = 10 * np.log10(Pxx_b / (ref + 1e-20) + 1e-20)
+        Pxx_a_rel_db = 10 * np.log10(Pxx_a / (ref + 1e-20) + 1e-20)
+    else:
+        Pxx_b_rel_db = 10 * np.log10(Pxx_b / (np.max(Pxx_b) + 1e-20) + 1e-20)
+        Pxx_a_rel_db = 10 * np.log10(Pxx_a / (np.max(Pxx_a) + 1e-20) + 1e-20)
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+
+    ax.plot(f / 1e6, Pxx_b_rel_db, linewidth=1.5, label='До DPD')
+    ax.plot(f / 1e6, Pxx_a_rel_db, linewidth=1.5, label='После DPD')
+
+    def add_band(band, label=None, alpha=0.08):
+        x0 = band[0] / 1e6
+        w = (band[1] - band[0]) / 1e6
+        y0, y1 = ax.get_ylim()
+        rect = Rectangle((x0, y0), w, y1 - y0, fill=True, alpha=alpha)
+        ax.add_patch(rect)
+        if label is not None:
+            ax.text(x0 + w / 2, y1 - 3, label, ha='center', va='top', fontsize=9)
+
+    if ylim_db is not None:
+        ax.set_ylim(ylim_db)
+
+    add_band(main, 'Main')
+    add_band(adj_m1, 'Adj -1')
+    add_band(adj_p1, 'Adj +1')
+
     if show_second_adjacent:
-        _add_band(ax, -2.5 * bw_mhz, -1.5 * bw_mhz, "Adj -2", alpha=0.06)
-        _add_band(ax, +1.5 * bw_mhz, +2.5 * bw_mhz, "Adj +2", alpha=0.06)
-
-    _add_band(ax, -1.5 * bw_mhz, -0.5 * bw_mhz, "Adj -1", alpha=0.08)
-    _add_band(ax, -0.5 * bw_mhz, +0.5 * bw_mhz, "Main",  alpha=0.10)
-    _add_band(ax, +0.5 * bw_mhz, +1.5 * bw_mhz, "Adj +1", alpha=0.08)
-
-    # Boundary lines
-    boundaries = [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5] if show_second_adjacent else [-1.5, -0.5, 0.5, 1.5]
-    for c in boundaries:
-        ax.axvline(c * bw_mhz, color='k', linestyle='--', linewidth=0.8)
-
-    # Curves
-    ax.plot(f_mhz, Pxx_b_rel_db, linewidth=1.8, label='До DPD')
-    ax.plot(f_mhz, Pxx_a_rel_db, linewidth=1.8, label='После DPD')
+        add_band(adj_m2, 'Adj -2', alpha=0.05)
+        add_band(adj_p2, 'Adj +2', alpha=0.05)
 
     ax.set_xlabel('Частота, МГц')
     ax.set_ylabel('Нормированная PSD, дБ')
     ax.set_title(title)
     ax.grid(True)
+    ax.legend()
 
-    if xlim_mhz is None:
-        if show_second_adjacent:
-            xlim_mhz = (-3 * bw_mhz, 3 * bw_mhz)
-        else:
-            xlim_mhz = (-2 * bw_mhz, 2 * bw_mhz)
-    ax.set_xlim(xlim_mhz)
+    if xlim_mhz is not None:
+        ax.set_xlim(xlim_mhz)
 
-    if ylim_db is not None:
-        ax.set_ylim(ylim_db)
-    else:
-        ax.set_ylim([-70, 5])
-
-    ax.legend(loc='upper right')
-
-    # Text box with ACLR
-    text_before = (
-        "До DPD\n"
-        f"ACLR(-1) = {met_b['aclr_m1_db']:.2f} dB\n"
-        f"ACLR(+1) = {met_b['aclr_p1_db']:.2f} dB"
-    )
-    text_after = (
-        "После DPD\n"
-        f"ACLR(-1) = {met_a['aclr_m1_db']:.2f} dB\n"
-        f"ACLR(+1) = {met_a['aclr_p1_db']:.2f} dB"
-    )
-
-    if show_second_adjacent:
-        text_before += (
-            f"\nACLR(-2) = {met_b['aclr_m2_db']:.2f} dB"
-            f"\nACLR(+2) = {met_b['aclr_p2_db']:.2f} dB"
-        )
-        text_after += (
-            f"\nACLR(-2) = {met_a['aclr_m2_db']:.2f} dB"
-            f"\nACLR(+2) = {met_a['aclr_p2_db']:.2f} dB"
-        )
-
-    ax.text(
-        0.02, 0.03, text_before,
-        transform=ax.transAxes,
-        fontsize=10,
-        verticalalignment='bottom',
-        bbox=dict(boxstyle='round', facecolor='white', alpha=0.85)
-    )
-    ax.text(
-        0.72, 0.03, text_after,
-        transform=ax.transAxes,
-        fontsize=10,
-        verticalalignment='bottom',
-        bbox=dict(boxstyle='round', facecolor='white', alpha=0.85)
-    )
+    metrics = {
+        'before': {
+            'aclr_m1_db': aclr_m1_b,
+            'aclr_p1_db': aclr_p1_b,
+            'aclr_m2_db': aclr_m2_b,
+            'aclr_p2_db': aclr_p2_b,
+            'leak_m1_dbc': leak_m1_b,
+            'leak_p1_dbc': leak_p1_b,
+            'leak_m2_dbc': leak_m2_b,
+            'leak_p2_dbc': leak_p2_b,
+        },
+        'after': {
+            'aclr_m1_db': aclr_m1_a,
+            'aclr_p1_db': aclr_p1_a,
+            'aclr_m2_db': aclr_m2_a,
+            'aclr_p2_db': aclr_p2_a,
+            'leak_m1_dbc': leak_m1_a,
+            'leak_p1_dbc': leak_p1_a,
+            'leak_m2_dbc': leak_m2_a,
+            'leak_p2_dbc': leak_p2_a,
+        }
+    }
 
     fig.tight_layout()
-
-    return fig, ax, {"before": met_b, "after": met_a}
+    return fig, ax, metrics

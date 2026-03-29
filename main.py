@@ -26,26 +26,26 @@ def build_params():
         'up': 4,
 
         # PA params
+        'pa_mode': 'iir',          # 'gmp' or 'iir'
         'pa_alpha': 0.8,
         'pa_memory': 3,
         'mem_decay': 0.7,
         'gmp_k': 2,
         'gmp_beta': 0.15,
+
+        # IIR mode params
+        'pa_b': [0.85, 0.12],
+        'pa_a': [1.0, -0.55, 0.16],
+        'pa_gain': 1.0,
     }
-    
-    prm["pa_mode"] = "iir"
-    prm["pa_alpha"] = 1
-    prm["pa_b"] = [0.85, 0.12]
-    prm["pa_a"] = [1.0, -0.55, 0.16]
-    prm["pa_gain"] = 1.0
 
     prm['cnn'] = {
         'memory': 5,
         'kernel': 5,
-        'filters': 6,
+        'filters': 8,
         'M1': 16,
-        'epochs': 50,
-        'lr': 5e-3,
+        'epochs': 120,
+        'lr': 1e-3,
         'seed': 42,
         'features': 'poly',
         'print_every': 10,
@@ -55,8 +55,8 @@ def build_params():
         'warm_start': True,
         'batch_size': 4096,
         'batch_mode': 'contig',
-        'residual': False,
-        'power_constraint': False,
+        'residual': True,
+        'power_constraint': True,
         'device': 'cpu',
     }
 
@@ -167,7 +167,6 @@ def plot_amam_ampm(x_ref, y_before, y_after):
     phi_before = np.angle(yb_al * np.conj(x_ref), deg=True)
     phi_after = np.angle(ya_al * np.conj(x_ref), deg=True)
 
-    # Для AM/PM отбрасываем слишком малые амплитуды
     thr_phi = 0.05 * np.max(a_in)
     mask_phi = a_in > thr_phi
 
@@ -176,7 +175,6 @@ def plot_amam_ampm(x_ref, y_before, y_after):
 
     fig, ax = plt.subplots(1, 2, figsize=(12, 5))
 
-    # AM/AM
     ax[0].scatter(
         a_in[::stride_am],
         a_out_before[::stride_am],
@@ -194,14 +192,12 @@ def plot_amam_ampm(x_ref, y_before, y_after):
 
     lim = max(np.max(a_in), np.max(a_out_before), np.max(a_out_after))
     ax[0].plot([0, lim], [0, lim], '--', linewidth=1.0, label='Идеальная линейность')
-
     ax[0].set_xlabel('Амплитуда входного сигнала')
     ax[0].set_ylabel('Амплитуда выходного сигнала')
     ax[0].set_title('AM/AM характеристика')
     ax[0].grid(True)
     ax[0].legend()
 
-    # AM/PM
     a_in_phi = a_in[mask_phi][::stride_pm]
     phi_b = phi_before[mask_phi][::stride_pm]
     phi_a = phi_after[mask_phi][::stride_pm]
@@ -221,7 +217,6 @@ def plot_amam_ampm(x_ref, y_before, y_after):
         label='После DPD'
     )
     ax[1].axhline(0.0, linestyle='--', linewidth=1.0, label='Идеальная линейность')
-
     ax[1].set_xlabel('Амплитуда входного сигнала')
     ax[1].set_ylabel('Фазовая ошибка, градусы')
     ax[1].set_title('AM/PM характеристика')
@@ -306,61 +301,45 @@ def main():
     plt.close('all')
     plt.rcParams['font.family'] = 'DejaVu Sans'
 
-    # -----------------------------
-    # Choose method
-    # -----------------------------
-    method = "cnn"   # "ls" or "lms" or "cnn"
-    cnn_backend = "torch"   # "torch" or "numpy"
+    method = "ls"           # "ls", "lms", "cnn"
+    cnn_backend = "torch"    # "torch" or "numpy"
 
     prm = build_params()
 
-    # -----------------------------
-    # Generate + normalize reference
-    # -----------------------------
     sig = generator(prm)
     x = sig / (np.max(np.abs(sig)) + 1e-15)
 
-    # -----------------------------
-    # PA output before DPD
-    # -----------------------------
     y = amp_model(prm, x)
 
-    # -----------------------------
-    # Align
-    # -----------------------------
     x_al, y_al, lag = align_by_xcorr(x, y, max_lag=300)
     print(f"Alignment lag = {lag} samples. Using aligned length = {len(x_al)}")
 
-    # -----------------------------
-    # DPD
-    # -----------------------------
     x_dpd, model = run_dpd(method, cnn_backend, x_al, y_al, prm)
 
     # -----------------------------
-    # PA output after DPD
+    # Normalize DPD drive level before PA
     # -----------------------------
+    p_ref = np.mean(np.abs(x_al)**2) + 1e-15
+    p_dpd = np.mean(np.abs(x_dpd)**2) + 1e-15
+    x_dpd = x_dpd * np.sqrt(p_ref / p_dpd)
+
+    print(f"Input RMS power before DPD drive norm: {10*np.log10(p_dpd):.2f} dB")
+    print(f"Reference RMS power: {10*np.log10(p_ref):.2f} dB")
+
     y_lin = amp_model(prm, x_dpd)
 
-    # -----------------------------
-    # Metrics
-    # -----------------------------
     nmse_before = nmse_db_gain_aligned(y_al, x_al)
     nmse_after = nmse_db_gain_aligned(y_lin, x_al)
 
     print(f"Gain-aligned NMSE before DPD: {nmse_before:.2f} dB")
     print(f"Gain-aligned NMSE after  DPD: {nmse_after:.2f} dB")
 
-    # -----------------------------
-    # PSD plot
-    # -----------------------------
     plot_output_psd(y_al, y_lin, prm)
 
-    # -----------------------------
-    # ACLR plot + metrics
-    # -----------------------------
     fs = prm['txFs'] * prm['up']
     bw_aclr = prm['sigBand'] + 5e6
 
+    # Общая нормировка: честное сравнение по уровню
     fig, ax, met = plot_aclr_nr_style(
         x_before=y_al,
         x_after=y_lin,
@@ -370,7 +349,22 @@ def main():
         noverlap=2048,
         xlim_mhz=(-100, 100),
         ylim_db=(-70, 5),
-        title='ACLR для сигнала на выходе усилителя'
+        title='ACLR для сигнала на выходе усилителя (общая нормировка)',
+        common_ref=True
+    )
+
+    # Индивидуальная нормировка: сравнение формы спектра
+    fig2, ax2, met2 = plot_aclr_nr_style(
+        x_before=y_al,
+        x_after=y_lin,
+        fs=fs,
+        bw=bw_aclr,
+        nperseg=4096,
+        noverlap=2048,
+        xlim_mhz=(-100, 100),
+        ylim_db=(-70, 5),
+        title='ACLR для сигнала на выходе усилителя (индивидуальная нормировка)',
+        common_ref=False
     )
 
     print("До DPD:")
@@ -385,15 +379,8 @@ def main():
     print(f"  Leakage(-1) = {met['after']['leak_m1_dbc']:.2f} dBc")
     print(f"  Leakage(+1) = {met['after']['leak_p1_dbc']:.2f} dBc")
 
-    # -----------------------------
-    # Characteristics
-    # -----------------------------
     plot_amam_ampm(x_al, y_al, y_lin)
     plot_gain_vs_input(x_al, y_al, y_lin)
-
-    # -----------------------------
-    # ILA convergence
-    # -----------------------------
     plot_ila_history(model)
 
     plt.show()
