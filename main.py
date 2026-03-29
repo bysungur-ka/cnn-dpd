@@ -20,7 +20,7 @@ from cnn_dpd_torch import cnn_dpd_torch
 
 def build_params():
     prm = {
-        'sizeSig': int(2e4),
+        'sizeSig': int(4e4),
         'txFs': 100e6,
         'sigBand': 20e6,
         'up': 4,
@@ -65,12 +65,33 @@ def build_params():
 
 def run_dpd(method, cnn_backend, x_al, y_al, prm):
     if method.lower() == "ls":
-        orders = (1, 3, 5)
-        ridge = 1e-6
-        a = ls_postdistorter_coeffs(y_al, x_al, orders=orders, ridge=ridge)
-        x_dpd = apply_predistorter(x_al, a, orders=orders)
-        model = {'a': a, 'orders': orders, 'ridge': ridge}
+        orders = (1, 3, 5, 7)
+        memory_depth = 5
+        ridge = 1e-3
 
+        a = ls_postdistorter_coeffs(
+            y_al,
+            x_al,
+            orders=orders,
+            memory_depth=memory_depth,
+            ridge=ridge,
+            normalize_gain=True,
+        )
+
+        x_dpd = apply_predistorter(
+            x_al,
+            a,
+            orders=orders,
+            memory_depth=memory_depth,
+        )
+
+        model = {
+            'a': a,
+            'orders': orders,
+            'memory_depth': memory_depth,
+            'ridge': ridge,
+       }
+        
     elif method.lower() == "lms":
         orders = (1, 3, 5)
         mu = 1e-2
@@ -139,7 +160,7 @@ def plot_output_psd(y_before, y_after, prm):
     plt.ylabel('Спектральная плотность мощности, дБ')
     plt.title('Спектральная плотность мощности на выходе усилителя')
     plt.xlim([-100, 100])
-    plt.ylim([-60, 0])
+    plt.ylim([-50, 0])
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
