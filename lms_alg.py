@@ -1,6 +1,6 @@
 # lms_alg.py
 import numpy as np
-from ls_alg import build_poly_matrix  # используем ТО ЖЕ, что и LS
+from ls_alg import build_poly_matrix 
 
 
 def lms_postdistorter_coeffs(

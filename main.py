@@ -32,6 +32,12 @@ def build_params():
         'gmp_k': 2,
         'gmp_beta': 0.15,
     }
+    
+    prm["pa_mode"] = "iir"
+    prm["pa_alpha"] = 1
+    prm["pa_b"] = [0.85, 0.12]
+    prm["pa_a"] = [1.0, -0.55, 0.16]
+    prm["pa_gain"] = 1.0
 
     prm['cnn'] = {
         'memory': 5,
@@ -303,7 +309,7 @@ def main():
     # -----------------------------
     # Choose method
     # -----------------------------
-    method = "cnn"
+    method = "cnn"   # "ls" or "lms" or "cnn"
     cnn_backend = "torch"   # "torch" or "numpy"
 
     prm = build_params()
