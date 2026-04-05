@@ -31,6 +31,60 @@ def _band_power(f, Pxx, f1, f2):
     return np.trapezoid(Pxx[mask], f[mask]) + 1e-20
 
 
+def _normalize_psd_pair(Pxx_b, Pxx_a, common_ref=True):
+    if common_ref:
+        ref = max(np.max(Pxx_b), np.max(Pxx_a))
+        Pxx_b_rel_db = 10 * np.log10(Pxx_b / (ref + 1e-20) + 1e-20)
+        Pxx_a_rel_db = 10 * np.log10(Pxx_a / (ref + 1e-20) + 1e-20)
+    else:
+        Pxx_b_rel_db = 10 * np.log10(Pxx_b / (np.max(Pxx_b) + 1e-20) + 1e-20)
+        Pxx_a_rel_db = 10 * np.log10(Pxx_a / (np.max(Pxx_a) + 1e-20) + 1e-20)
+
+    return Pxx_b_rel_db, Pxx_a_rel_db
+
+
+def plot_psd_nr_style(
+    x_before,
+    x_after,
+    fs,
+    nperseg=4096,
+    noverlap=2048,
+    xlim_mhz=None,
+    ylim_db=None,
+    title='Спектральная плотность мощности на выходе усилителя',
+    common_ref=True,
+):
+    """
+    PSD plot in the same visual style as ACLR plot,
+    but without highlighted channel bands.
+    """
+    x_before = np.asarray(x_before, dtype=np.complex128)
+    x_after = np.asarray(x_after, dtype=np.complex128)
+
+    f, Pxx_b = _welch_psd(x_before, fs=fs, nperseg=nperseg, noverlap=noverlap)
+    _, Pxx_a = _welch_psd(x_after, fs=fs, nperseg=nperseg, noverlap=noverlap)
+
+    Pxx_b_rel_db, Pxx_a_rel_db = _normalize_psd_pair(Pxx_b, Pxx_a, common_ref=common_ref)
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+    ax.plot(f / 1e6, Pxx_b_rel_db, linewidth=1.5, label='До DPD')
+    ax.plot(f / 1e6, Pxx_a_rel_db, linewidth=1.5, label='После DPD')
+
+    ax.set_xlabel('Частота, МГц')
+    ax.set_ylabel('Нормированная PSD, дБ')
+    ax.set_title(title)
+    ax.grid(True)
+    ax.legend()
+
+    if xlim_mhz is not None:
+        ax.set_xlim(xlim_mhz)
+    if ylim_db is not None:
+        ax.set_ylim(ylim_db)
+
+    fig.tight_layout()
+    return fig, ax
+
+
 def plot_aclr_nr_style(
     x_before,
     x_after,
@@ -46,27 +100,13 @@ def plot_aclr_nr_style(
 ):
     """
     NR-style ACLR plot.
-
-    Parameters
-    ----------
-    x_before, x_after : complex ndarray
-        Signals before and after DPD
-    fs : float
-        Sampling frequency
-    bw : float
-        Main channel bandwidth
-    common_ref : bool
-        True  -> both spectra normalized to one common peak
-        False -> each spectrum normalized to its own peak
     """
-
     x_before = np.asarray(x_before, dtype=np.complex128)
     x_after = np.asarray(x_after, dtype=np.complex128)
 
     f, Pxx_b = _welch_psd(x_before, fs=fs, nperseg=nperseg, noverlap=noverlap)
     _, Pxx_a = _welch_psd(x_after, fs=fs, nperseg=nperseg, noverlap=noverlap)
 
-    # Main and adjacent channels
     main = (-bw / 2, bw / 2)
     adj_m1 = (-3 * bw / 2, -bw / 2)
     adj_p1 = (bw / 2, 3 * bw / 2)
@@ -74,14 +114,12 @@ def plot_aclr_nr_style(
     adj_m2 = (-5 * bw / 2, -3 * bw / 2)
     adj_p2 = (3 * bw / 2, 5 * bw / 2)
 
-    # Powers before
     Pm_b = _band_power(f, Pxx_b, *main)
     Padj_m1_b = _band_power(f, Pxx_b, *adj_m1)
     Padj_p1_b = _band_power(f, Pxx_b, *adj_p1)
     Padj_m2_b = _band_power(f, Pxx_b, *adj_m2)
     Padj_p2_b = _band_power(f, Pxx_b, *adj_p2)
 
-    # Powers after
     Pm_a = _band_power(f, Pxx_a, *main)
     Padj_m1_a = _band_power(f, Pxx_a, *adj_m1)
     Padj_p1_a = _band_power(f, Pxx_a, *adj_p1)
@@ -108,17 +146,9 @@ def plot_aclr_nr_style(
     leak_m2_a = 10 * np.log10(Padj_m2_a / Pm_a)
     leak_p2_a = 10 * np.log10(Padj_p2_a / Pm_a)
 
-    # Normalize PSD for plotting
-    if common_ref:
-        ref = max(np.max(Pxx_b), np.max(Pxx_a))
-        Pxx_b_rel_db = 10 * np.log10(Pxx_b / (ref + 1e-20) + 1e-20)
-        Pxx_a_rel_db = 10 * np.log10(Pxx_a / (ref + 1e-20) + 1e-20)
-    else:
-        Pxx_b_rel_db = 10 * np.log10(Pxx_b / (np.max(Pxx_b) + 1e-20) + 1e-20)
-        Pxx_a_rel_db = 10 * np.log10(Pxx_a / (np.max(Pxx_a) + 1e-20) + 1e-20)
+    Pxx_b_rel_db, Pxx_a_rel_db = _normalize_psd_pair(Pxx_b, Pxx_a, common_ref=common_ref)
 
     fig, ax = plt.subplots(figsize=(11, 6))
-
     ax.plot(f / 1e6, Pxx_b_rel_db, linewidth=1.5, label='До DPD')
     ax.plot(f / 1e6, Pxx_a_rel_db, linewidth=1.5, label='После DPD')
 

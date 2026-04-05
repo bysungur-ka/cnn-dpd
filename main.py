@@ -4,7 +4,7 @@ from scipy import signal
 
 from generator import generator
 from amp_model import amp_model
-from aclr import plot_aclr_nr_style
+from aclr import plot_psd_nr_style, plot_aclr_nr_style
 
 from ls_alg import (
     align_by_xcorr,
@@ -66,9 +66,9 @@ def build_params():
 
 def run_dpd(method, cnn_backend, x_al, y_al, prm):
     if method.lower() == "ls":
-        orders = (1, 3, 5, 7)
-        memory_depth = 5
-        ridge = 1e-3
+        orders = (1, 3, 5)
+        memory_depth = 8
+        ridge = 1e-2
 
         a = ls_postdistorter_coeffs(
             y_al,
@@ -356,12 +356,21 @@ def main():
     print(f"Gain-aligned NMSE before DPD: {nmse_before:.2f} dB")
     print(f"Gain-aligned NMSE after  DPD: {nmse_after:.2f} dB")
 
-    plot_output_psd(y_al, y_lin, prm)
-
     fs = prm['txFs'] * prm['up']
     bw_aclr = prm['sigBand'] + 5e6
+    
+    fig0, ax0 = plot_psd_nr_style(
+        x_before=y_al,
+        x_after=y_lin,
+        fs=fs,
+        nperseg=4096,
+        noverlap=2048,
+        xlim_mhz=(-100, 100),
+        ylim_db=(-70, 5),
+        title='Спектральная плотность мощности на выходе усилителя',
+        common_ref=True
+    )
 
-    # Общая нормировка: честное сравнение по уровню
     fig, ax, met = plot_aclr_nr_style(
         x_before=y_al,
         x_after=y_lin,
@@ -371,22 +380,8 @@ def main():
         noverlap=2048,
         xlim_mhz=(-100, 100),
         ylim_db=(-70, 5),
-        title='ACLR для сигнала на выходе усилителя (общая нормировка)',
+        title='ACLR для сигнала на выходе усилителя',
         common_ref=True
-    )
-
-    # Индивидуальная нормировка: сравнение формы спектра
-    fig2, ax2, met2 = plot_aclr_nr_style(
-        x_before=y_al,
-        x_after=y_lin,
-        fs=fs,
-        bw=bw_aclr,
-        nperseg=4096,
-        noverlap=2048,
-        xlim_mhz=(-100, 100),
-        ylim_db=(-70, 5),
-        title='ACLR для сигнала на выходе усилителя (индивидуальная нормировка)',
-        common_ref=False
     )
 
     print("До DPD:")
