@@ -21,9 +21,10 @@ from cnn_dpd_torch import cnn_dpd_torch
 def build_params():
     prm = {
         'sizeSig': int(4e4),
-        'txFs': 100e6,
+        'txFs': 30.72e6,
         'sigBand': 20e6,
-        'up': 4,
+        'up': 8,
+        'signal_mode': 'ofdm',  # 'noise' or 'ofdm'
 
         # PA params
         'pa_mode': 'iir',          # 'gmp' or 'iir'
@@ -42,8 +43,8 @@ def build_params():
     prm['cnn'] = {
         'memory': 5,
         'kernel': 5,
-        'filters': 8,
-        'M1': 16,
+        'filters': 6,
+        'M1': 8,
         'epochs': 120,
         'lr': 1e-3,
         'seed': 42,
@@ -322,7 +323,7 @@ def main():
     plt.close('all')
     plt.rcParams['font.family'] = 'DejaVu Sans'
 
-    method = "ls"           # "ls", "lms", "cnn"
+    method = "cnn"           # "ls", "lms", "cnn"
     cnn_backend = "torch"    # "torch" or "numpy"
 
     prm = build_params()
