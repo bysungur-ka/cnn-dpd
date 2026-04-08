@@ -1,6 +1,7 @@
+import copy
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy import signal
+import torch
 
 from generator import generator
 from amp_model import amp_model
@@ -15,7 +16,11 @@ from ls_alg import (
 from lms_alg import lms_postdistorter_coeffs
 
 from cnn_dpd import cnn_dpd
-from cnn_dpd_torch import cnn_dpd_torch
+from cnn_dpd_torch import (
+    cnn_dpd_torch,
+    CNNPostDistorter,
+    apply_predistorter_torch,
+)
 
 
 def build_params():
@@ -24,10 +29,14 @@ def build_params():
         'txFs': 30.72e6,
         'sigBand': 20e6,
         'up': 8,
-        'signal_mode': 'ofdm',  # 'noise' or 'ofdm'
+        'signal_mode': 'ofdm',   # 'noise' or 'ofdm'
+
+        # generator seeds
+        'signal_seed_train': 101,
+        'signal_seed_test': 202,
 
         # PA params
-        'pa_mode': 'iir',          # 'gmp' or 'iir'
+        'pa_mode': 'iir',        # 'gmp' or 'iir'
         'pa_alpha': 0.8,
         'pa_memory': 3,
         'mem_decay': 0.7,
@@ -38,6 +47,17 @@ def build_params():
         'pa_b': [0.85, 0.12],
         'pa_a': [1.0, -0.55, 0.16],
         'pa_gain': 1.0,
+
+        # OFDM-like params
+        'ofdm_nfft': 1024,
+        'ofdm_scs': 30e3,
+        'ofdm_n_rb': 51,
+        'ofdm_cp_len': 72,
+        'ofdm_qam_order': 1024,
+        'ofdm_passband': 9e6,
+        'ofdm_stopband': 10.5e6,
+        'ofdm_filter_atten_db': 70.0,
+        'ofdm_post_num_taps': 201,
     }
 
     prm['cnn'] = {
@@ -91,21 +111,30 @@ def run_dpd(method, cnn_backend, x_al, y_al, prm):
             'orders': orders,
             'memory_depth': memory_depth,
             'ridge': ridge,
-       }
-        
+            'kind': 'mp_ls',
+        }
+
     elif method.lower() == "lms":
         orders = (1, 3, 5)
         mu = 1e-2
         epochs_lms = 100
 
         a = lms_postdistorter_coeffs(
-            y_al, x_al,
+            y_al,
+            x_al,
             orders=orders,
             mu=mu,
             epochs=epochs_lms
         )
+
         x_dpd = apply_predistorter(x_al, a, orders=orders)
-        model = {'a': a, 'orders': orders, 'mu': mu, 'epochs': epochs_lms}
+        model = {
+            'a': a,
+            'orders': orders,
+            'mu': mu,
+            'epochs': epochs_lms,
+            'kind': 'lms',
+        }
 
     elif method.lower() == "cnn":
         if cnn_backend == "torch":
@@ -115,8 +144,10 @@ def run_dpd(method, cnn_backend, x_al, y_al, prm):
                 prm,
                 pa_fn=lambda z: amp_model(prm, z)
             )
+            model['kind'] = 'cnn_torch'
         elif cnn_backend == "numpy":
             x_dpd, model = cnn_dpd(x_al, y_al, prm)
+            model['kind'] = 'cnn_numpy'
         else:
             raise ValueError('cnn_backend must be "torch" or "numpy"')
 
@@ -124,47 +155,6 @@ def run_dpd(method, cnn_backend, x_al, y_al, prm):
         raise ValueError('method must be "ls" or "lms" or "cnn"')
 
     return x_dpd, model
-
-
-def welch_psd_db(x, fs, nperseg=4096, noverlap=2048):
-    f, Pxx = signal.welch(
-        x,
-        fs=fs,
-        window='hann',
-        nperseg=nperseg,
-        noverlap=noverlap,
-        return_onesided=False,
-        scaling='density'
-    )
-
-    Pxx = np.fft.fftshift(Pxx)
-    f = np.fft.fftshift(f)
-
-    center = len(Pxx) // 2
-    if center > 0:
-        Pxx[center] = Pxx[center - 1]
-
-    Pxx_db = 10 * np.log10(Pxx / (np.max(Pxx) + 1e-15) + 1e-15)
-    return f, Pxx_db
-
-
-def plot_output_psd(y_before, y_after, prm):
-    fs = prm['txFs'] * prm['up']
-
-    f, PxxB_db = welch_psd_db(y_before, fs=fs)
-    _, PxxA_db = welch_psd_db(y_after, fs=fs)
-
-    plt.figure()
-    plt.plot(f / 1e6, PxxB_db, linewidth=1.5, label='До DPD')
-    plt.plot(f / 1e6, PxxA_db, linewidth=1.5, label='После DPD')
-    plt.xlabel('Частота, МГц')
-    plt.ylabel('Спектральная плотность мощности, дБ')
-    plt.title('Спектральная плотность мощности на выходе усилителя')
-    plt.xlim([-100, 100])
-    plt.ylim([-50, 0])
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
 
 
 def gain_align(y, x):
@@ -254,7 +244,6 @@ def plot_gain_vs_input(x_ref, y_before, y_after):
     ya_al, _ = gain_align(y_after, x_ref)
 
     eps = 1e-15
-
     pin_db = 20 * np.log10(np.abs(x_ref) + eps)
     pout_before_db = 20 * np.log10(np.abs(yb_al) + eps)
     pout_after_db = 20 * np.log10(np.abs(ya_al) + eps)
@@ -319,60 +308,120 @@ def plot_ila_history(model):
     plt.tight_layout()
 
 
-def main():
-    plt.close('all')
-    plt.rcParams['font.family'] = 'DejaVu Sans'
+def generate_aligned_pair(prm, signal_seed):
+    prm_sig = copy.deepcopy(prm)
+    prm_sig['seed'] = int(signal_seed)
 
-    method = "cnn"           # "ls", "lms", "cnn"
-    cnn_backend = "torch"    # "torch" or "numpy"
-
-    prm = build_params()
-
-    sig = generator(prm)
+    sig = generator(prm_sig)
     x = sig / (np.max(np.abs(sig)) + 1e-15)
-
-    y = amp_model(prm, x)
+    y = amp_model(prm_sig, x)
 
     x_al, y_al, lag = align_by_xcorr(x, y, max_lag=300)
-    print(f"Alignment lag = {lag} samples. Using aligned length = {len(x_al)}")
+    return x_al, y_al, lag
 
-    x_dpd, model = run_dpd(method, cnn_backend, x_al, y_al, prm)
 
-    # -----------------------------
-    # Normalize DPD drive level before PA
-    # -----------------------------
-    p_ref = np.mean(np.abs(x_al)**2) + 1e-15
-    p_dpd = np.mean(np.abs(x_dpd)**2) + 1e-15
-    x_dpd = x_dpd * np.sqrt(p_ref / p_dpd)
+def normalize_drive(x_ref, x_dpd):
+    p_ref = np.mean(np.abs(x_ref) ** 2) + 1e-15
+    p_dpd = np.mean(np.abs(x_dpd) ** 2) + 1e-15
+    x_dpd_n = x_dpd * np.sqrt(p_ref / p_dpd)
+    return x_dpd_n, p_ref, p_dpd
 
-    print(f"Input RMS power before DPD drive norm: {10*np.log10(p_dpd):.2f} dB")
-    print(f"Reference RMS power: {10*np.log10(p_ref):.2f} dB")
+
+def apply_saved_cnn_torch(model_dict, x_ref):
+    features = model_dict['features']
+    K = int(model_dict['K'])
+    Ff = int(model_dict['F'])
+    M1 = int(model_dict['M1'])
+    residual = bool(model_dict['residual'])
+    power_constraint = bool(model_dict.get('power_constraint', True))
+    feat_rms_np = np.asarray(model_dict['feat_rms'], dtype=np.float32)
+    state_dict = model_dict['torch_state_dict']
+    device = torch.device(model_dict.get('device', 'cpu'))
+
+    C = 6 if features.lower() == 'poly' else 2
+
+    model = CNNPostDistorter(
+        C=C,
+        K=K,
+        Ff=Ff,
+        M1=M1,
+        residual=residual,
+    ).to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    x_t = torch.from_numpy(np.asarray(x_ref, dtype=np.complex128)).to(device)
+    feat_rms_t = torch.from_numpy(feat_rms_np).to(device)
+
+    with torch.no_grad():
+        x_dpd_t = apply_predistorter_torch(
+            model=model,
+            x=x_t,
+            features=features,
+            feat_rms=feat_rms_t,
+            device=device,
+            power_constraint=power_constraint,
+        )
+
+    return x_dpd_t.detach().cpu().numpy().astype(np.complex128)
+
+
+def apply_model_on_signal(method, cnn_backend, model, x_ref):
+    if method.lower() == "ls":
+        return apply_predistorter(
+            x_ref,
+            model['a'],
+            orders=model['orders'],
+            memory_depth=model['memory_depth'],
+        )
+
+    if method.lower() == "lms":
+        return apply_predistorter(
+            x_ref,
+            model['a'],
+            orders=model['orders'],
+        )
+
+    if method.lower() == "cnn":
+        if cnn_backend == "torch":
+            return apply_saved_cnn_torch(model, x_ref)
+        raise NotImplementedError("Test-time apply for numpy CNN is not implemented here.")
+
+    raise ValueError('method must be "ls" or "lms" or "cnn"')
+
+
+def evaluate_case(tag, prm, method, cnn_backend, model, x_ref, y_ref, make_plots=False):
+    x_dpd = apply_model_on_signal(method, cnn_backend, model, x_ref)
+    x_dpd, p_ref, p_dpd = normalize_drive(x_ref, x_dpd)
 
     y_lin = amp_model(prm, x_dpd)
 
-    nmse_before = nmse_db_gain_aligned(y_al, x_al)
-    nmse_after = nmse_db_gain_aligned(y_lin, x_al)
+    nmse_before = nmse_db_gain_aligned(y_ref, x_ref)
+    nmse_after = nmse_db_gain_aligned(y_lin, x_ref)
 
+    print(f"\n[{tag}]")
+    print(f"Input RMS power before DPD drive norm: {10*np.log10(p_dpd):.2f} dB")
+    print(f"Reference RMS power: {10*np.log10(p_ref):.2f} dB")
     print(f"Gain-aligned NMSE before DPD: {nmse_before:.2f} dB")
     print(f"Gain-aligned NMSE after  DPD: {nmse_after:.2f} dB")
 
     fs = prm['txFs'] * prm['up']
     bw_aclr = prm['sigBand'] + 5e6
-    
+
     fig0, ax0 = plot_psd_nr_style(
-        x_before=y_al,
+        x_before=y_ref,
         x_after=y_lin,
         fs=fs,
         nperseg=4096,
         noverlap=2048,
         xlim_mhz=(-100, 100),
         ylim_db=(-70, 5),
-        title='Спектральная плотность мощности на выходе усилителя',
+        title=f'Спектральная плотность мощности на выходе усилителя [{tag}]',
         common_ref=True
     )
 
     fig, ax, met = plot_aclr_nr_style(
-        x_before=y_al,
+        x_before=y_ref,
         x_after=y_lin,
         fs=fs,
         bw=bw_aclr,
@@ -380,24 +429,85 @@ def main():
         noverlap=2048,
         xlim_mhz=(-100, 100),
         ylim_db=(-70, 5),
-        title='ACLR для сигнала на выходе усилителя',
+        title=f'ACLR для сигнала на выходе усилителя [{tag}]',
         common_ref=True
     )
 
-    print("До DPD:")
+    print(f"[{tag}] До DPD:")
     print(f"  ACLR(-1) = {met['before']['aclr_m1_db']:.2f} dB")
     print(f"  ACLR(+1) = {met['before']['aclr_p1_db']:.2f} dB")
     print(f"  Leakage(-1) = {met['before']['leak_m1_dbc']:.2f} dBc")
     print(f"  Leakage(+1) = {met['before']['leak_p1_dbc']:.2f} dBc")
 
-    print("После DPD:")
+    print(f"[{tag}] После DPD:")
     print(f"  ACLR(-1) = {met['after']['aclr_m1_db']:.2f} dB")
     print(f"  ACLR(+1) = {met['after']['aclr_p1_db']:.2f} dB")
     print(f"  Leakage(-1) = {met['after']['leak_m1_dbc']:.2f} dBc")
     print(f"  Leakage(+1) = {met['after']['leak_p1_dbc']:.2f} dBc")
 
-    plot_amam_ampm(x_al, y_al, y_lin)
-    plot_gain_vs_input(x_al, y_al, y_lin)
+    if make_plots:
+        plot_amam_ampm(x_ref, y_ref, y_lin)
+        plot_gain_vs_input(x_ref, y_ref, y_lin)
+
+    return {
+        'x_dpd': x_dpd,
+        'y_lin': y_lin,
+        'nmse_before_db': nmse_before,
+        'nmse_after_db': nmse_after,
+        'aclr': met,
+    }
+
+
+def main():
+    plt.close('all')
+    plt.rcParams['font.family'] = 'DejaVu Sans'
+
+    method = "cnn"        # "ls", "lms", "cnn"
+    cnn_backend = "torch" # "torch" or "numpy"
+
+    prm = build_params()
+
+    # -----------------------------
+    # Train waveform
+    # -----------------------------
+    x_train, y_train, lag_train = generate_aligned_pair(prm, prm['signal_seed_train'])
+    print(f"[TRAIN] Alignment lag = {lag_train} samples. Using aligned length = {len(x_train)}")
+
+    # Train DPD on train waveform
+    _, model = run_dpd(method, cnn_backend, x_train, y_train, prm)
+
+    # -----------------------------
+    # Evaluate on the same train waveform
+    # -----------------------------
+    train_res = evaluate_case(
+        tag="TRAIN",
+        prm=prm,
+        method=method,
+        cnn_backend=cnn_backend,
+        model=model,
+        x_ref=x_train,
+        y_ref=y_train,
+        make_plots=False,
+    )
+
+    # -----------------------------
+    # Independent test waveform
+    # -----------------------------
+    x_test, y_test, lag_test = generate_aligned_pair(prm, prm['signal_seed_test'])
+    print(f"\n[TEST] Alignment lag = {lag_test} samples. Using aligned length = {len(x_test)}")
+
+    test_res = evaluate_case(
+        tag="TEST",
+        prm=prm,
+        method=method,
+        cnn_backend=cnn_backend,
+        model=model,
+        x_ref=x_test,
+        y_ref=y_test,
+        make_plots=True,
+    )
+
+    # CNN ILA history makes sense to show once
     plot_ila_history(model)
 
     plt.show()
