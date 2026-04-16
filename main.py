@@ -29,19 +29,34 @@ def build_params():
         'txFs': 30.72e6,
         'sigBand': 20e6,
         'up': 8,
-        'signal_mode': 'ofdm',   # 'noise' or 'ofdm'
+        'signal_mode': 'noise',   # 'noise' or 'ofdm'
 
         # generator seeds
         'signal_seed_train': 101,
         'signal_seed_test': 202,
 
         # PA params
-        'pa_mode': 'iir',        # 'gmp' or 'iir'
+        'pa_mode': 'gmp',
         'pa_alpha': 0.8,
         'pa_memory': 3,
         'mem_decay': 0.7,
-        'gmp_k': 2,
         'gmp_beta': 0.15,
+
+        'gmp_aligned_orders': [1, 3, 5],
+        'gmp_aligned_memory': 3,
+
+        'gmp_lag_orders': [3],
+        'gmp_lag_memory': 3,
+        'gmp_lag_env_delays': [2],
+
+        # сначала лучше выключить leading:
+        'gmp_lead_orders': [],
+        'gmp_lead_memory': 3,
+        'gmp_lead_env_delays': [],
+        # MP model params
+        'mp_orders': [1, 3, 5],
+        'mp_memory_depth': 3,
+        'mp_alpha': 0.8,
 
         # IIR mode params
         'pa_b': [0.85, 0.12],
@@ -415,7 +430,7 @@ def evaluate_case(tag, prm, method, cnn_backend, model, x_ref, y_ref, make_plots
         nperseg=4096,
         noverlap=2048,
         xlim_mhz=(-100, 100),
-        ylim_db=(-70, 5),
+        ylim_db=(-60, 5),
         title=f'Спектральная плотность мощности на выходе усилителя [{tag}]',
         common_ref=True
     )
@@ -428,7 +443,7 @@ def evaluate_case(tag, prm, method, cnn_backend, model, x_ref, y_ref, make_plots
         nperseg=4096,
         noverlap=2048,
         xlim_mhz=(-100, 100),
-        ylim_db=(-70, 5),
+        ylim_db=(-60, 5),
         title=f'ACLR для сигнала на выходе усилителя [{tag}]',
         common_ref=True
     )
@@ -457,12 +472,96 @@ def evaluate_case(tag, prm, method, cnn_backend, model, x_ref, y_ref, make_plots
         'aclr': met,
     }
 
+def plot_pa_amam_ampm(x_in, y_out):
+    y_al, _ = gain_align(y_out, x_in)
+
+    a_in = np.abs(x_in)
+    a_out = np.abs(y_al)
+    phi = np.angle(y_al * np.conj(x_in), deg=True)
+
+    thr_phi = 0.05 * np.max(a_in)
+    mask_phi = a_in > thr_phi
+
+    stride_am = _scatter_stride(len(a_in), max_points=30000)
+    stride_pm = _scatter_stride(np.count_nonzero(mask_phi), max_points=30000)
+
+    fig, ax = plt.subplots(1, 2, figsize=(12, 5))
+
+    # AM/AM
+    ax[0].scatter(
+        a_in[::stride_am],
+        a_out[::stride_am],
+        s=10,
+        alpha=0.45,
+        label='PA'
+    )
+
+    lim = max(np.max(a_in), np.max(a_out))
+    ax[0].plot([0, lim], [0, lim], '--', linewidth=1.0, label='Идеальная линейность')
+
+    ax[0].set_xlabel('Амплитуда входного сигнала')
+    ax[0].set_ylabel('Амплитуда выходного сигнала')
+    ax[0].set_title('AM/AM характеристика усилителя')
+    ax[0].grid(True)
+    ax[0].legend()
+
+    # AM/PM
+    ax[1].scatter(
+        a_in[mask_phi][::stride_pm],
+        phi[mask_phi][::stride_pm],
+        s=10,
+        alpha=0.45,
+        label='PA'
+    )
+    ax[1].axhline(0.0, linestyle='--', linewidth=1.0, label='Идеальная линейность')
+
+    ax[1].set_xlabel('Амплитуда входного сигнала')
+    ax[1].set_ylabel('Фазовая ошибка, градусы')
+    ax[1].set_title('AM/PM характеристика усилителя')
+    ax[1].grid(True)
+    ax[1].legend()
+
+    fig.suptitle('Характеристики усилителя мощности')
+    fig.tight_layout()
+    
+def plot_pa_gain_vs_input(x_in, y_out):
+    y_al, _ = gain_align(y_out, x_in)
+
+    eps = 1e-15
+    pin_db = 20 * np.log10(np.abs(x_in) + eps)
+    pout_db = 20 * np.log10(np.abs(y_al) + eps)
+    gain_db = pout_db - pin_db
+
+    thr = 0.02 * np.max(np.abs(x_in))
+    mask = np.abs(x_in) > thr
+
+    pin_db = pin_db[mask]
+    gain_db = gain_db[mask]
+
+    stride = _scatter_stride(len(pin_db), max_points=30000)
+
+    plt.figure(figsize=(6, 5))
+    plt.scatter(
+        pin_db[::stride],
+        gain_db[::stride],
+        s=10,
+        alpha=0.45,
+        label='PA'
+    )
+    plt.axhline(0.0, linestyle='--', linewidth=1.0, label='Идеально постоянное усиление')
+    plt.xlabel('Уровень входного сигнала, дБ')
+    plt.ylabel('Коэффициент усиления, дБ')
+    plt.title('Gain vs Input Level для усилителя')
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    
 
 def main():
     plt.close('all')
     plt.rcParams['font.family'] = 'DejaVu Sans'
 
-    method = "cnn"        # "ls", "lms", "cnn"
+    method = "ls"        # "ls", "lms", "cnn"
     cnn_backend = "torch" # "torch" or "numpy"
 
     prm = build_params()
@@ -475,6 +574,9 @@ def main():
 
     # Train DPD on train waveform
     _, model = run_dpd(method, cnn_backend, x_train, y_train, prm)
+    
+    plot_pa_amam_ampm(x_train, y_train)
+    plot_pa_gain_vs_input(x_train, y_train)
 
     # -----------------------------
     # Evaluate on the same train waveform
