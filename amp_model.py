@@ -39,9 +39,9 @@ def _shift_signal(x, shift):
     """
     Возвращает x[n - shift] с zero-padding.
 
-    shift > 0 : задержка  -> x[n-shift]
+    shift > 0 : задержка
     shift = 0 : без сдвига
-    shift < 0 : опережение -> x[n+|shift|]
+    shift < 0 : опережение
     """
     x = np.asarray(x, dtype=np.complex128)
     n_samples = len(x)
@@ -63,7 +63,11 @@ def _shift_signal(x, shift):
 def _get_complex_dict(user_dict):
     if user_dict is None:
         return None
-    return {tuple(map(int, k)): np.complex128(v) for k, v in user_dict.items()}
+
+    return {
+        tuple(int(v) for v in key): np.complex128(val)
+        for key, val in user_dict.items()
+    }
 
 
 def amp_model(prm, x):
@@ -76,14 +80,13 @@ def amp_model(prm, x):
        - один lagging envelope cross-term
 
     2) pa_mode = 'gmp'
-       Структура GMP по Morgan:
+       GMP по Morgan:
        - aligned terms
        - lagging envelope cross-terms
-       - leading envelope cross-terms (опционально)
+       - leading envelope cross-terms
 
     3) pa_mode = 'mp'
-       Memory Polynomial model:
-           y[n] = sum_{k odd} sum_q b_{kq} x[n-q] |x[n-q]|^(k-1)
+       Memory Polynomial model
 
     4) pa_mode = 'iir'
        Полиномиальная нелинейность + IIR память
@@ -91,33 +94,31 @@ def amp_model(prm, x):
     x = np.asarray(x, dtype=np.complex128)
     mode = str(prm.get("pa_mode", "gmp_like")).lower()
 
-    # Общие коэффициенты, которые можно переиспользовать
+    # Базовые коэффициенты нелинейности
     c1 = 14.974 + 1j * 0.0519
     c3 = -23.0954 + 1j * 4.968
     c5 = 21.3936 + 1j * 0.4305
 
     # -------------------------------------------------
-    # 1) GMP-like mode (старый твой вариант)
+    # 1) Старый упрощённый вариант
     # -------------------------------------------------
     if mode == "gmp_like":
         alpha = float(prm.get("pa_alpha", 1.0))
-        memory_depth = int(prm.get("pa_memory", 3))
-        env_lag_k = int(prm.get("gmp_k", 2))
         beta = float(prm.get("gmp_beta", 0.15))
         mem_decay = float(prm.get("mem_decay", 0.7))
+        memory_depth = int(prm.get("pa_memory", 3))
+        env_lag_k = int(prm.get("gmp_k", 2))
 
-        n_samples = len(x)
         y = np.zeros_like(x)
-        env2 = np.abs(x) ** 2
 
         for m in range(memory_depth):
-            w = mem_decay**m
+            w = mem_decay ** m
             xm = _shift_signal(x, m)
 
             y += w * xm * (
                 c1
                 + alpha * c3 * np.abs(xm) ** 2
-                + (alpha**2) * c5 * np.abs(xm) ** 4
+                + (alpha ** 2) * c5 * np.abs(xm) ** 4
             )
 
             if env_lag_k > 0:
@@ -127,14 +128,15 @@ def amp_model(prm, x):
         return y
 
     # -------------------------------------------------
-    # 2) Morgan-style GMP
+    # 2) GMP по Morgan
     # -------------------------------------------------
     elif mode == "gmp":
         alpha = float(prm.get("pa_alpha", 1.0))
         beta = float(prm.get("gmp_beta", 0.15))
+        lead_beta = float(prm.get("gmp_lead_beta", 0.05))
         mem_decay = float(prm.get("mem_decay", 0.7))
 
-        # ----- Index sets / structure -----
+        # ----- Structure -----
         aligned_orders = list(prm.get("gmp_aligned_orders", [1, 3, 5]))
         aligned_memory = int(prm.get("gmp_aligned_memory", prm.get("pa_memory", 3)))
 
@@ -146,31 +148,32 @@ def amp_model(prm, x):
         lead_memory = int(prm.get("gmp_lead_memory", prm.get("pa_memory", 3)))
         lead_env_delays = list(prm.get("gmp_lead_env_delays", []))
 
-        # ----- Optional user coefficients -----
-        # dict formats:
-        #   gmp_a_coeffs[(p, m)] = coeff
-        #   gmp_b_coeffs[(p, m, l)] = coeff
-        #   gmp_c_coeffs[(p, m, l)] = coeff
+        # ----- Optional explicit coefficients -----
+        # gmp_a_coeffs[(p, m)] = coeff
+        # gmp_b_coeffs[(p, m, l)] = coeff
+        # gmp_c_coeffs[(p, m, l)] = coeff
         a_user = _get_complex_dict(prm.get("gmp_a_coeffs", None))
         b_user = _get_complex_dict(prm.get("gmp_b_coeffs", None))
         c_user = _get_complex_dict(prm.get("gmp_c_coeffs", None))
-
-        # ----- Defaults close to current gmp_like behavior -----
-        aligned_base = {
-            1: c1,
-            3: alpha * c3,
-            5: (alpha**2) * c5,
-        }
 
         y = np.zeros_like(x)
 
         # ----- Aligned terms -----
         for p in aligned_orders:
+            if p == 1:
+                base_coeff = c1
+            elif p == 3:
+                base_coeff = alpha * c3
+            elif p == 5:
+                base_coeff = (alpha ** 2) * c5
+            else:
+                base_coeff = 0.0 + 0.0j
+
             for m in range(aligned_memory):
                 xm = _shift_signal(x, m)
 
                 if a_user is None:
-                    coeff = (mem_decay**m) * aligned_base.get(p, 0.0 + 0.0j)
+                    coeff = (mem_decay ** m) * base_coeff
                 else:
                     coeff = a_user.get((p, m), 0.0 + 0.0j)
 
@@ -179,8 +182,13 @@ def amp_model(prm, x):
 
                 y += coeff * xm * (np.abs(xm) ** (p - 1))
 
-        # ----- Lagging envelope cross-terms -----
+        # ----- Lagging cross-terms -----
         for p in lag_orders:
+            if p == 1:
+                scale_p = 1.0
+            else:
+                scale_p = alpha ** ((p - 1) // 2)
+
             for m in range(lag_memory):
                 xm = _shift_signal(x, m)
 
@@ -188,12 +196,7 @@ def amp_model(prm, x):
                     x_env = _shift_signal(x, m + l)
 
                     if b_user is None:
-                        # по умолчанию оставляем аналог старой модели:
-                        # только p=3 имеет ненулевой cross-term
-                        if p == 3:
-                            coeff = (mem_decay**m) * (beta * alpha)
-                        else:
-                            coeff = 0.0 + 0.0j
+                        coeff = (mem_decay ** m) * beta * scale_p
                     else:
                         coeff = b_user.get((p, m, l), 0.0 + 0.0j)
 
@@ -202,8 +205,13 @@ def amp_model(prm, x):
 
                     y += coeff * xm * (np.abs(x_env) ** (p - 1))
 
-        # ----- Leading envelope cross-terms -----
+        # ----- Leading cross-terms -----
         for p in lead_orders:
+            if p == 1:
+                scale_p = 1.0
+            else:
+                scale_p = alpha ** ((p - 1) // 2)
+
             for m in range(lead_memory):
                 xm = _shift_signal(x, m)
 
@@ -211,8 +219,7 @@ def amp_model(prm, x):
                     x_env = _shift_signal(x, m - l)  # x[n-m+l]
 
                     if c_user is None:
-                        # по умолчанию leading выключен, если coeffs не заданы явно
-                        coeff = 0.0 + 0.0j
+                        coeff = (mem_decay ** m) * lead_beta * scale_p
                     else:
                         coeff = c_user.get((p, m, l), 0.0 + 0.0j)
 
@@ -227,13 +234,10 @@ def amp_model(prm, x):
     # 3) MP mode
     # -------------------------------------------------
     elif mode == "mp":
-        # По умолчанию: коэффициенты из Ding, Example 3.5
         orders = list(prm.get("mp_orders", [1, 3, 5]))
         memory_depth = int(prm.get("mp_memory_depth", 3))
         mp_alpha = float(prm.get("mp_alpha", 1.0))
 
-        # Если пользователь передал свои коэффициенты:
-        # формат: coeffs[(k, q)] = complex
         user_coeffs = prm.get("mp_coeffs", None)
 
         if user_coeffs is None:
@@ -283,7 +287,7 @@ def amp_model(prm, x):
         z = x * (
             c1
             + alpha * c3 * np.abs(x) ** 2
-            + (alpha**2) * c5 * np.abs(x) ** 4
+            + (alpha ** 2) * c5 * np.abs(x) ** 4
         )
 
         b = prm.get("pa_b", [0.85, 0.12])
