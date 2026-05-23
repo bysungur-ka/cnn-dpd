@@ -29,10 +29,14 @@ def build_params():
         "txFs": 30.72e6,
         "sigBand": 20e6,
         "up": 8,
-        "signal_mode": "noise",  # 'noise' or 'ofdm'
+        "signal_mode": "ofdm",  # 'noise' or 'ofdm'
         # generator seeds
         "signal_seed_train": 101,
         "signal_seed_test": 202,
+        "plot_signal": True,
+        "plot_dir": "figures",
+        "plot_prefix": "ofdm_input_signal",
+        "iq_plot_samples": 2000,
         # PA params
         "pa_mode": "gmp",
         "pa_alpha": 0.8,
@@ -85,7 +89,7 @@ def build_params():
         "orders": (1, 3, 5, 7),
         "memory_depth": 5,
         "mu": 0.1,
-        "epochs": 200,
+        "epochs": 400,
         "normalize_gain": True,
         "normalized": True,
         "shuffle": False,

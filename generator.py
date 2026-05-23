@@ -1,5 +1,9 @@
 import numpy as np
 from scipy.signal import remez, lfilter, firwin, upfirdn, kaiserord, resample_poly
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import welch
 
 
 def _trim_or_pad(x: np.ndarray, target_len: int):
@@ -7,7 +11,7 @@ def _trim_or_pad(x: np.ndarray, target_len: int):
     if len(x) >= target_len:
         return x[:target_len]
     y = np.zeros(target_len, dtype=np.complex128)
-    y[:len(x)] = x
+    y[: len(x)] = x
     return y
 
 
@@ -17,7 +21,9 @@ def _generate_square_qam(n: int, qam_order: int, rng: np.random.Generator):
     """
     m_side = int(np.sqrt(qam_order))
     if m_side * m_side != qam_order or (m_side % 2) != 0:
-        raise ValueError("qam_order must be a square even-order QAM, e.g. 16, 64, 256, 1024")
+        raise ValueError(
+            "qam_order must be a square even-order QAM, e.g. 16, 64, 256, 1024"
+        )
 
     levels = np.arange(-(m_side - 1), m_side, 2)
     real = rng.choice(levels, n)
@@ -127,7 +133,7 @@ def _generate_ofdm_mode(prm, rng: np.random.Generator):
     for _ in range(n_ofdm_symbols):
         freq_domain = np.zeros(N_fft, dtype=np.complex128)
         qam_syms = _generate_square_qam(n_subcarriers, qam_order, rng)
-        freq_domain[center - half:center + half] = qam_syms
+        freq_domain[center - half : center + half] = qam_syms
 
         time_domain = np.fft.ifft(np.fft.ifftshift(freq_domain)) * np.sqrt(N_fft)
         cp = time_domain[-cp_len:]
@@ -150,12 +156,7 @@ def _generate_ofdm_mode(prm, rng: np.random.Generator):
     num_taps1 = int(np.ceil((atten_db - 8) / (2.285 * delta_omega))) | 1
     num_taps1 = max(num_taps1, 65)
 
-    h1 = firwin(
-        num_taps1,
-        cutoff=passband,
-        window=("kaiser", kaiser_beta),
-        fs=txFs
-    )
+    h1 = firwin(num_taps1, cutoff=passband, window=("kaiser", kaiser_beta), fs=txFs)
 
     tx_filtered = lfilter(h1, 1.0, tx_signal)
     delay1 = len(h1) // 2
@@ -201,15 +202,117 @@ def generator(prm):
       ofdm_filter_atten_db
       ofdm_post_num_taps
       seed (optional)
+
+    Дополнительно для графиков:
+      plot_signal : bool
+      plot_dir : str
+      plot_prefix : str
+      iq_plot_samples : int
     """
     mode = str(prm.get("signal_mode", "noise")).lower()
     seed = prm.get("seed", None)
     rng = np.random.default_rng(seed)
 
     if mode == "noise":
-        return _generate_noise_mode(prm, rng)
+        x = _generate_noise_mode(prm, rng)
 
-    if mode == "ofdm":
-        return _generate_ofdm_mode(prm, rng)
+    elif mode == "ofdm":
+        x = _generate_ofdm_mode(prm, rng)
 
-    raise ValueError("signal_mode must be 'noise' or 'ofdm'")
+    else:
+        raise ValueError("signal_mode must be 'noise' or 'ofdm'")
+
+    if prm.get("plot_signal", False):
+        _plot_generated_signal(x, prm, mode)
+
+    return x
+
+
+def _plot_generated_signal(x, prm, mode):
+    """
+    Сохраняет графики сгенерированного комплексного сигнала:
+      1) нормированный спектр;
+      2) I/Q-компоненты во времени.
+
+    x   : complex ndarray
+    prm : словарь параметров генератора
+    mode: 'noise' or 'ofdm'
+    """
+    x = np.asarray(x).reshape(-1)
+
+    tx_fs = float(prm.get("txFs", 1.0))
+    up = float(prm.get("up", 1.0))
+    fs = tx_fs * up
+
+    plot_dir = prm.get("plot_dir", "figures")
+    os.makedirs(plot_dir, exist_ok=True)
+
+    prefix = prm.get("plot_prefix", f"{mode}_signal")
+
+    # ---------- 1. Спектр / PSD ----------
+    nperseg = min(8192, len(x))
+    if nperseg < 16:
+        raise ValueError("Signal is too short for spectrum plotting")
+
+    f, pxx = welch(
+        x,
+        fs=fs,
+        window="hann",
+        nperseg=nperseg,
+        noverlap=nperseg // 2,
+        return_onesided=False,
+        scaling="density",
+        detrend=False,
+    )
+
+    f = np.fft.fftshift(f)
+    pxx = np.fft.fftshift(pxx)
+
+    pxx_norm = pxx / (np.max(pxx) + 1e-30)
+    pxx_db = 10 * np.log10(pxx_norm + 1e-30)
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+
+    ax.plot(f / 1e6, pxx_db, linewidth=1.2, color="#d63103")
+
+    sig_band = prm.get("sigBand", None)
+    if sig_band is not None:
+        sig_band = float(sig_band)
+        ax.axvline(-sig_band / 2 / 1e6, linestyle="--", linewidth=1.0, color="gray")
+        ax.axvline(sig_band / 2 / 1e6, linestyle="--", linewidth=1.0, color="gray")
+
+    ax.set_xlabel("Частота, МГц")
+    ax.set_ylabel("Нормированная спектральная \n плотность мощности, дБ")
+    ax.grid(True, linewidth=0.4)
+    ax.set_ylim(-70, 5)
+    ax.set_xlim(-40, 40)
+
+    fig.tight_layout()
+    spectrum_path = os.path.join(plot_dir, f"{prefix}_spectrum.png")
+    fig.savefig(spectrum_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    # ---------- 2. I/Q во времени ----------
+    n_show = int(prm.get("iq_plot_samples", min(2000, len(x))))
+    n_show = min(n_show, len(x))
+
+    t = np.arange(n_show) / fs
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+
+    ax.plot(t * 1e6, np.real(x[:n_show]), linewidth=1.0, label="I-компонента")
+    ax.plot(t * 1e6, np.imag(x[:n_show]), linewidth=1.0, label="Q-компонента")
+
+    ax.set_xlabel("Время, мкс")
+    ax.set_ylabel("Амплитуда, отн. ед.")
+    ax.grid(True, linewidth=0.4)
+    ax.legend()
+
+    fig.tight_layout()
+    iq_path = os.path.join(plot_dir, f"{prefix}_iq_time.png")
+    fig.savefig(iq_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"Saved signal plots:")
+    print(f"  {spectrum_path}")
+    print(f"  {iq_path}")
