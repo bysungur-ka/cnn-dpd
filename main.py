@@ -1,4 +1,5 @@
 import copy
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -97,6 +98,25 @@ def build_params():
     }
 
     return prm
+
+
+def set_thesis_plot_style():
+
+    plt.rcParams.update(
+        {
+            "font.family": "DejaVu Sans",
+            "font.size": 13,
+            "axes.labelsize": 14,
+            "axes.titlesize": 14,
+            "legend.fontsize": 12,
+            "xtick.labelsize": 12,
+            "ytick.labelsize": 12,
+            "figure.titlesize": 14,
+            "lines.linewidth": 1.5,
+            "axes.grid": True,
+            "grid.linewidth": 0.5,
+        }
+    )
 
 
 def run_dpd(method, cnn_backend, x_al, y_al, prm):
@@ -466,51 +486,128 @@ def evaluate_case(tag, prm, method, cnn_backend, model, x_ref, y_ref, make_plots
     }
 
 
-def plot_pa_amam_ampm(x_in, y_out):
-    y_al, _ = gain_align(y_out, x_in)
+def plot_pa_amam_ampm(
+    x_in,
+    y_out,
+    out_dir="figures",
+    prefix="pa",
+    max_points=30000,
+    save=True,
+    show=False,
+):
+    """
+    Строит AM-AM и AM-PM характеристики модели усилителя мощности.
 
+    x_in  : вход усилителя u[n]
+    y_out : выход усилителя y[n]
+
+    Сохраняет:
+      figures/pa_am_am.png
+      figures/pa_am_pm.png
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    x_in = np.asarray(x_in).reshape(-1)
+    y_out = np.asarray(y_out).reshape(-1)
+
+    n = min(len(x_in), len(y_out))
+    x_in = x_in[:n]
+    y_out = y_out[:n]
+
+    # Амплитуды
     a_in = np.abs(x_in)
-    a_out = np.abs(y_al)
-    phi = np.angle(y_al * np.conj(x_in), deg=True)
+    a_out = np.abs(y_out)
 
-    thr_phi = 0.05 * np.max(a_in)
-    mask_phi = a_in > thr_phi
+    # Фазовый сдвиг между выходом и входом
+    phase_shift = np.angle(y_out * np.conj(x_in), deg=True)
 
-    stride_am = _scatter_stride(len(a_in), max_points=30000)
-    stride_pm = _scatter_stride(np.count_nonzero(mask_phi), max_points=30000)
+    # Убираем точки с очень малой входной амплитудой:
+    # там фаза плохо определена и дает шум на AM-PM.
+    amp_thr = 0.05 * np.max(a_in)
+    mask_pm = a_in > amp_thr
 
-    fig, ax = plt.subplots(1, 2, figsize=(12, 5))
+    # Прореживание точек, чтобы PNG не был тяжелым
+    stride_am = max(1, len(a_in) // max_points)
+    stride_pm = max(1, np.count_nonzero(mask_pm) // max_points)
 
-    # AM/AM
-    ax[0].scatter(a_in[::stride_am], a_out[::stride_am], s=10, alpha=0.45, label="PA")
+    # -------------------------
+    # AM-AM
+    # -------------------------
+    fig, ax = plt.subplots(figsize=(7.2, 5.0))
+
+    ax.scatter(
+        a_in[::stride_am],
+        a_out[::stride_am],
+        s=7,
+        alpha=0.35,
+        label="Модель усилителя",
+    )
 
     lim = max(np.max(a_in), np.max(a_out))
-    ax[0].plot([0, lim], [0, lim], "--", linewidth=1.0, label="Идеальная линейность")
-
-    ax[0].set_xlabel("Амплитуда входного сигнала")
-    ax[0].set_ylabel("Амплитуда выходного сигнала")
-    ax[0].set_title("AM/AM характеристика усилителя")
-    ax[0].grid(True)
-    ax[0].legend()
-
-    # AM/PM
-    ax[1].scatter(
-        a_in[mask_phi][::stride_pm],
-        phi[mask_phi][::stride_pm],
-        s=10,
-        alpha=0.45,
-        label="PA",
+    ax.plot(
+        [0, lim],
+        [0, lim],
+        "--",
+        linewidth=1.2,
+        label="Идеальная линейность",
     )
-    ax[1].axhline(0.0, linestyle="--", linewidth=1.0, label="Идеальная линейность")
 
-    ax[1].set_xlabel("Амплитуда входного сигнала")
-    ax[1].set_ylabel("Фазовая ошибка, градусы")
-    ax[1].set_title("AM/PM характеристика усилителя")
-    ax[1].grid(True)
-    ax[1].legend()
+    ax.set_xlabel(r"Aмплитуда входного сигнала")
+    ax.set_ylabel(r"Амплитуда выходного сигнала")
+    ax.legend(loc="best")
+    ax.grid(True)
 
-    fig.suptitle("Характеристики усилителя мощности")
     fig.tight_layout()
+
+    amam_path = os.path.join(out_dir, f"{prefix}_am_am.png")
+    if save:
+        fig.savefig(amam_path, dpi=300, bbox_inches="tight")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    # -------------------------
+    # AM-PM
+    # -------------------------
+    fig, ax = plt.subplots(figsize=(7.2, 5.0))
+
+    ax.scatter(
+        a_in[mask_pm][::stride_pm],
+        phase_shift[mask_pm][::stride_pm],
+        s=7,
+        alpha=0.35,
+        label="Модель усилителя",
+    )
+
+    ax.axhline(
+        0.0,
+        linestyle="--",
+        linewidth=1.2,
+        label="Отсутствие фазового сдвига",
+    )
+
+    ax.set_xlabel(r"Амплитуда входного сигнала")
+    ax.set_ylabel(r"Фазовый сдвиг, градусы")
+    ax.legend(loc="best")
+    ax.grid(True)
+
+    fig.tight_layout()
+
+    ampm_path = os.path.join(out_dir, f"{prefix}_am_pm.png")
+    if save:
+        fig.savefig(ampm_path, dpi=300, bbox_inches="tight")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    if save:
+        print("Saved PA AM-AM / AM-PM plots:")
+        print(f"  {amam_path}")
+        print(f"  {ampm_path}")
+
+    return amam_path, ampm_path
 
 
 def plot_pa_gain_vs_input(x_in, y_out):
@@ -536,17 +633,65 @@ def plot_pa_gain_vs_input(x_in, y_out):
     )
     plt.xlabel("Уровень входного сигнала, дБ")
     plt.ylabel("Коэффициент усиления, дБ")
-    plt.title("Gain vs Input Level для усилителя")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
+
+
+def plot_pa_input_output_spectrum(
+    x_in,
+    y_out,
+    prm,
+    out_dir="figures",
+    filename="pa_input_output_spectrum.png",
+):
+    """
+    Строит спектры входного и выходного сигналов усилителя.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    fs = prm["txFs"] * prm["up"]
+
+    fig, ax = plot_psd_nr_style(
+        x_before=x_in,
+        x_after=y_out,
+        fs=fs,
+        nperseg=4096,
+        noverlap=2048,
+        xlim_mhz=(-60, 60),
+        ylim_db=(-90, 5),
+        common_ref=True,
+    )
+
+    handles, labels = ax.get_legend_handles_labels()
+    if len(handles) >= 2:
+        ax.legend(
+            handles[:2],
+            ["Вход усилителя", "Выход усилителя"],
+            loc="best",
+        )
+
+    ax.set_xlabel("Частота, МГц")
+    ax.set_ylabel("Нормированная спектральная \n плотность мощности, дБ")
+    ax.grid(True)
+
+    fig.tight_layout()
+
+    path = os.path.join(out_dir, filename)
+    fig.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print("Saved PA spectrum plot:")
+    print(f"  {path}")
+
+    return path
 
 
 def main():
     plt.close("all")
     plt.rcParams["font.family"] = "DejaVu Sans"
 
-    method = "lms"  # "ls", "lms", "cnn"
+    method = "cnn"  # "ls", "lms", "cnn"
     cnn_backend = "torch"  # "torch" or "numpy"
 
     prm = build_params()
@@ -557,6 +702,36 @@ def main():
     x_train, y_train, lag_train = generate_aligned_pair(prm, prm["signal_seed_train"])
     print(
         f"[TRAIN] Alignment lag = {lag_train} samples. Using aligned length = {len(x_train)}"
+    )
+
+    set_thesis_plot_style()
+
+    eps = 1e-12
+
+    norm = np.max(np.abs(x_train)) + eps
+
+    x_plot = x_train / norm
+    y_plot = y_train / norm
+
+    alpha = np.vdot(y_plot, x_plot) / (np.vdot(y_plot, y_plot) + eps)
+    y_plot_aligned = alpha * y_plot
+
+    plot_pa_input_output_spectrum(
+        x_plot,
+        y_plot_aligned,
+        prm,
+        out_dir="figures",
+        filename="pa_input_output_spectrum.png",
+    )
+
+    plot_pa_amam_ampm(
+        x_plot,
+        y_plot_aligned,
+        out_dir="figures",
+        prefix="pa",
+        max_points=30000,
+        save=True,
+        show=False,
     )
 
     # Train DPD on train waveform
