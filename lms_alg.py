@@ -55,91 +55,141 @@ def lms_postdistorter_coeffs(
     x: np.ndarray,
     orders=(1, 3, 5),
     memory_depth: int = 3,
-    mu: float = 0.05,
-    epochs: int = 30,
-    normalize_gain: bool = True,
-    normalized: bool = True,
-    shuffle: bool = False,
+    mu: float = 1e-3,
+    epochs: int = 20,
+    w0: np.ndarray | None = None,
     print_every: int = 1,
-    return_gain: bool = False,
+    verbose: bool = True,
 ):
     """
-    LMS/NLMS-оценка коэффициентов postdistorter-а с MP-базисом:
+    Обучение постдистортера на основе нормализованного LMS.
 
-        x_hat[n] = sum_{m,p} a_{p,m} y_eff[n-m] |y_eff[n-m]|^(p-1)
+    Используется в ILA-схеме:
+        вход модели  : y[n]  — выход усилителя;
+        целевой сигнал: x[n] — вход усилителя / эталон после выравнивания.
 
-    где
-        y_eff = y / G, если normalize_gain=True
+    Модель:
+        x_hat[n] = phi[n]^T a
 
-    Parameters
-    ----------
-    y : ndarray
-        PA output (aligned)
-    x : ndarray
-        PA input / reference target (aligned)
-    orders : tuple
-        Polynomial orders
-    memory_depth : int
-        MP memory depth
-    mu : float
-        Шаг LMS. Для normalized=True обычно 0.01...0.1
-    epochs : int
-        Число проходов по данным
-    normalize_gain : bool
-        Нормировать ли y по комплексному gain
-    normalized : bool
-        Если True, используется NLMS
-    shuffle : bool
-        Перемешивать ли отсчёты внутри эпохи
-    print_every : int
-        Печать каждые print_every эпох
-    return_gain : bool
-        Если True, вернуть (a, G)
+    NLMS-обновление:
+        a <- a + mu / (eps + ||phi[n]||^2) * conj(phi[n]) * e[n]
+
+    Параметры:
+        y            : комплексный вход постдистортера;
+        x            : целевой комплексный сигнал;
+        orders       : порядки нелинейности, например (1, 3, 5);
+        memory_depth : глубина памяти;
+        mu           : шаг адаптации NLMS;
+        epochs       : число эпох;
+        w0           : начальные коэффициенты;
+        print_every  : как часто печатать лог;
+        verbose      : печатать ли лог.
+
+    Возвращает:
+        a : комплексные коэффициенты модели.
     """
-    y = np.asarray(y, dtype=np.complex128)
-    x = np.asarray(x, dtype=np.complex128)
-
-    if len(y) != len(x):
-        raise ValueError("x and y must have the same length")
-
-    G = 1.0 + 0.0j
-    if normalize_gain:
-        G = estimate_complex_gain(x, y)
-        y_eff = y / (G + 1e-15)
-    else:
-        y_eff = y
-
-    phi = build_mp_matrix(y_eff, orders=orders, memory_depth=memory_depth)
-    n_samples, n_features = phi.shape
-
-    # Инициализация: линейный коэффициент = 1, остальные = 0
-    a = np.zeros(n_features, dtype=np.complex128)
-    a[0] = 1.0 + 0.0j
+    import numpy as np
 
     eps = 1e-12
-    idx = np.arange(n_samples)
 
-    for epoch in range(1, epochs + 1):
-        if shuffle:
-            np.random.shuffle(idx)
+    y = np.asarray(y, dtype=np.complex128).reshape(-1)
+    x = np.asarray(x, dtype=np.complex128).reshape(-1)
 
-        for n in idx:
-            phi_n = phi[n]
-            x_hat_n = phi_n @ a
-            e_n = x[n] - x_hat_n
+    n0 = min(len(y), len(x))
+    y = y[:n0]
+    x = x[:n0]
 
-            if normalized:
-                step = mu / (np.vdot(phi_n, phi_n).real + eps)
-            else:
-                step = mu
+    if memory_depth < 1:
+        raise ValueError("memory_depth must be >= 1")
 
-            a = a + step * np.conj(phi_n) * e_n
+    if len(y) <= memory_depth:
+        raise ValueError("Signal is too short for selected memory_depth")
 
-        if (epoch == 1) or (epoch % print_every == 0) or (epoch == epochs):
-            x_hat = phi @ a
-            train_nmse = nmse_db(x_hat, x)
-            print(f" Epoch {epoch:5d}/{epochs} | Train NMSE(u)={train_nmse:.2f} dB")
+    # Матрица признаков MP:
+    # phi[n] = z[n-m] |z[n-m]|^(k-1)
+    Phi = build_mp_matrix(
+        y,
+        orders=orders,
+        memory_depth=memory_depth,
+    )
 
-    if return_gain:
-        return a, G
+    # Первые memory_depth - 1 отсчетов не имеют полной истории
+    start = memory_depth - 1
+    Phi = Phi[start:, :]
+    x = x[start:]
+
+    n_samples, n_coeffs = Phi.shape
+
+    # Нормировка столбцов матрицы признаков для численной устойчивости
+    col_rms = np.sqrt(np.mean(np.abs(Phi) ** 2, axis=0) + eps)
+    Phi_n = Phi / col_rms
+
+    # Начальная инициализация
+    if w0 is None:
+        a_n = np.zeros(n_coeffs, dtype=np.complex128)
+
+        # Инициализация линейного члена как тождественного преобразования.
+        # Это полезно для ILA: начальная модель хотя бы пропускает сигнал.
+        a_n[0] = 1.0 + 0.0j
+    else:
+        a_n = np.asarray(w0, dtype=np.complex128).reshape(-1)
+
+        if a_n.size != n_coeffs:
+            raise ValueError(f"w0 has length {a_n.size}, but expected {n_coeffs}")
+
+        # Если w0 был задан в ненормированной шкале, переводим его
+        # в шкалу нормированных признаков.
+        a_n = a_n * col_rms
+
+    if verbose:
+        print("[LMS] Training postdistorter")
+        print(f"[LMS] orders = {orders}")
+        print(f"[LMS] memory_depth = {memory_depth}")
+        print(f"[LMS] n_samples = {n_samples}")
+        print(f"[LMS] n_coeffs = {n_coeffs}")
+        print(f"[LMS] mu = {mu}")
+        print(f"[LMS] epochs = {epochs}")
+
+    for epoch in range(epochs):
+        mse_acc = 0.0
+        x_power_acc = 0.0
+
+        for n in range(n_samples):
+            phi = Phi_n[n, :]
+
+            x_hat = phi @ a_n
+            e = x[n] - x_hat
+
+            phi_power = np.vdot(phi, phi).real + eps
+
+            # NLMS update
+            a_n = a_n + (mu / phi_power) * np.conj(phi) * e
+
+            mse_acc += np.abs(e) ** 2
+            x_power_acc += np.abs(x[n]) ** 2
+
+            if not np.all(np.isfinite(a_n)):
+                raise FloatingPointError(
+                    f"LMS/NLMS diverged at epoch={epoch + 1}, sample={n}. "
+                    f"Try smaller mu."
+                )
+
+        mse_epoch = mse_acc / n_samples
+        nmse_epoch = 10.0 * np.log10((mse_acc + eps) / (x_power_acc + eps))
+        coef_norm = np.linalg.norm(a_n)
+
+        if verbose and (
+            epoch == 0 or (epoch + 1) % print_every == 0 or (epoch + 1) == epochs
+        ):
+            print(
+                f"[LMS] epoch {epoch + 1:4d}/{epochs}, "
+                f"MSE = {mse_epoch:.3e}, "
+                f"NMSE = {nmse_epoch:.2f} dB, "
+                f"coef_norm = {coef_norm:.3e}"
+            )
+
+    # Возврат коэффициентов из шкалы нормированных признаков
+    # к исходной матрице признаков
+    a = a_n / col_rms
+
     return a

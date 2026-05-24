@@ -87,14 +87,12 @@ def build_params():
     }
 
     prm["lms"] = {
-        "orders": (1, 3, 5, 7),
+        "orders": (1, 3, 5),
         "memory_depth": 5,
-        "mu": 0.1,
-        "epochs": 400,
-        "normalize_gain": True,
-        "normalized": True,
-        "shuffle": False,
-        "print_every": 10,
+        "mu": 1e-3,
+        "epochs": 50,
+        "print_every": 1,
+        "verbose": True,
     }
 
     return prm
@@ -150,17 +148,17 @@ def run_dpd(method, cnn_backend, x_al, y_al, prm):
         }
 
     elif method.lower() == "lms":
-        lms_prm = prm["lms"]
 
-        orders = tuple(lms_prm.get("orders", (1, 3, 5)))
-        memory_depth = int(lms_prm.get("memory_depth", 3))
-        mu = float(lms_prm.get("mu", 0.05))
-        epochs_lms = int(lms_prm.get("epochs", 30))
-        normalize_gain = bool(lms_prm.get("normalize_gain", True))
-        normalized = bool(lms_prm.get("normalized", True))
-        shuffle = bool(lms_prm.get("shuffle", False))
-        print_every = int(lms_prm.get("print_every", 5))
+        lms_prm = prm.get("lms", {})
 
+        orders = lms_prm.get("orders", (1, 3, 5))
+        memory_depth = lms_prm.get("memory_depth", 3)
+        mu = lms_prm.get("mu", 1e-3)
+        epochs_lms = lms_prm.get("epochs", 20)
+        print_every = lms_prm.get("print_every", 1)
+        verbose = lms_prm.get("verbose", True)
+
+        # ILA: обучаем постдистортер y -> x
         a = lms_postdistorter_coeffs(
             y_al,
             x_al,
@@ -168,12 +166,11 @@ def run_dpd(method, cnn_backend, x_al, y_al, prm):
             memory_depth=memory_depth,
             mu=mu,
             epochs=epochs_lms,
-            normalize_gain=normalize_gain,
-            normalized=normalized,
-            shuffle=shuffle,
             print_every=print_every,
+            verbose=verbose,
         )
 
+        # После обучения используем эти же коэффициенты как предысказитель x -> u
         x_dpd = apply_predistorter(
             x_al,
             a,
@@ -691,7 +688,7 @@ def main():
     plt.close("all")
     plt.rcParams["font.family"] = "DejaVu Sans"
 
-    method = "cnn"  # "ls", "lms", "cnn"
+    method = "lms"  # "ls", "lms", "cnn"
     cnn_backend = "torch"  # "torch" or "numpy"
 
     prm = build_params()
