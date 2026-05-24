@@ -14,7 +14,12 @@ from ls_alg import (
     apply_predistorter,
     nmse_db_gain_aligned,
 )
-from lms_alg import lms_postdistorter_coeffs
+
+from lms_alg import (
+    lms_postdistorter_coeffs,
+    apply_mp_predistorter,
+    train_lms_ila_predistorter,
+)
 
 from cnn_dpd import cnn_dpd
 from cnn_dpd_torch import (
@@ -87,10 +92,13 @@ def build_params():
     }
 
     prm["lms"] = {
-        "orders": (1, 3, 5),
+        "orders": (1, 3, 5, 7),
         "memory_depth": 5,
-        "mu": 1e-3,
-        "epochs": 50,
+        "mu": 0.03,
+        "epochs": 5,
+        "ila_iters": 8,
+        "warm_start": True,
+        "keep_best": True,
         "print_every": 1,
         "verbose": True,
     }
@@ -151,41 +159,12 @@ def run_dpd(method, cnn_backend, x_al, y_al, prm):
 
         lms_prm = prm.get("lms", {})
 
-        orders = lms_prm.get("orders", (1, 3, 5))
-        memory_depth = lms_prm.get("memory_depth", 3)
-        mu = lms_prm.get("mu", 1e-3)
-        epochs_lms = lms_prm.get("epochs", 20)
-        print_every = lms_prm.get("print_every", 1)
-        verbose = lms_prm.get("verbose", True)
-
-        # ILA: обучаем постдистортер y -> x
-        a = lms_postdistorter_coeffs(
-            y_al,
-            x_al,
-            orders=orders,
-            memory_depth=memory_depth,
-            mu=mu,
-            epochs=epochs_lms,
-            print_every=print_every,
-            verbose=verbose,
+        x_dpd, model = train_lms_ila_predistorter(
+            x_al=x_al,
+            y_al=y_al,
+            pa_fn=lambda u: amp_model(prm, u),
+            lms_prm=lms_prm,
         )
-
-        # После обучения используем эти же коэффициенты как предысказитель x -> u
-        x_dpd = apply_predistorter(
-            x_al,
-            a,
-            orders=orders,
-            memory_depth=memory_depth,
-        )
-
-        model = {
-            "a": a,
-            "orders": orders,
-            "memory_depth": memory_depth,
-            "mu": mu,
-            "epochs": epochs_lms,
-            "kind": "lms_mp",
-        }
 
     elif method.lower() == "cnn":
         if cnn_backend == "torch":
@@ -398,12 +377,16 @@ def apply_model_on_signal(method, cnn_backend, model, x_ref):
         )
 
     if method.lower() == "lms":
-        return apply_predistorter(
+        x_dpd = apply_mp_predistorter(
             x_ref,
             model["a"],
             orders=model["orders"],
             memory_depth=model["memory_depth"],
         )
+
+        x_dpd, _, _ = normalize_drive(x_ref, x_dpd)
+
+        return x_dpd
 
     if method.lower() == "cnn":
         if cnn_backend == "torch":
