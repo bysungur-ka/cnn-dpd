@@ -14,7 +14,11 @@ from ls_alg import (
     apply_predistorter,
     nmse_db_gain_aligned,
 )
-from lms_alg import lms_postdistorter_coeffs
+from lms_alg import (
+    lms_postdistorter_coeffs,
+    train_lms_feedback_predistorter,
+    apply_mp_feedback_predistorter,
+)
 
 from cnn_dpd import cnn_dpd
 from cnn_dpd_torch import (
@@ -26,7 +30,7 @@ from cnn_dpd_torch import (
 
 def build_params():
     prm = {
-        "sizeSig": int(4e4),
+        "sizeSig": int(6e4),
         "txFs": 30.72e6,
         "sigBand": 20e6,
         "up": 8,
@@ -87,14 +91,15 @@ def build_params():
     }
 
     prm["lms"] = {
-        "orders": (1, 3, 5, 7),
+        "orders": (1, 3, 5),
         "memory_depth": 5,
-        "mu": 0.1,
-        "epochs": 400,
-        "normalize_gain": True,
+        "mu": 0.01,
+        "epochs": 20,
+        "ila_iters": 100,
+        "feedback_beta": 0.7,
         "normalized": True,
         "shuffle": False,
-        "print_every": 10,
+        "print_every": 5,
     }
 
     return prm
@@ -150,45 +155,13 @@ def run_dpd(method, cnn_backend, x_al, y_al, prm):
         }
 
     elif method.lower() == "lms":
-        lms_prm = prm["lms"]
 
-        orders = tuple(lms_prm.get("orders", (1, 3, 5)))
-        memory_depth = int(lms_prm.get("memory_depth", 3))
-        mu = float(lms_prm.get("mu", 0.05))
-        epochs_lms = int(lms_prm.get("epochs", 30))
-        normalize_gain = bool(lms_prm.get("normalize_gain", True))
-        normalized = bool(lms_prm.get("normalized", True))
-        shuffle = bool(lms_prm.get("shuffle", False))
-        print_every = int(lms_prm.get("print_every", 5))
-
-        a = lms_postdistorter_coeffs(
-            y_al,
-            x_al,
-            orders=orders,
-            memory_depth=memory_depth,
-            mu=mu,
-            epochs=epochs_lms,
-            normalize_gain=normalize_gain,
-            normalized=normalized,
-            shuffle=shuffle,
-            print_every=print_every,
+        x_dpd, model = train_lms_feedback_predistorter(
+            x_al=x_al,
+            y_al=y_al,
+            pa_fn=lambda z: amp_model(prm, z),
+            lms_prm=prm["lms"],
         )
-
-        x_dpd = apply_predistorter(
-            x_al,
-            a,
-            orders=orders,
-            memory_depth=memory_depth,
-        )
-
-        model = {
-            "a": a,
-            "orders": orders,
-            "memory_depth": memory_depth,
-            "mu": mu,
-            "epochs": epochs_lms,
-            "kind": "lms_mp",
-        }
 
     elif method.lower() == "cnn":
         if cnn_backend == "torch":
@@ -401,7 +374,7 @@ def apply_model_on_signal(method, cnn_backend, model, x_ref):
         )
 
     if method.lower() == "lms":
-        return apply_predistorter(
+        return apply_mp_feedback_predistorter(
             x_ref,
             model["a"],
             orders=model["orders"],
@@ -691,7 +664,7 @@ def main():
     plt.close("all")
     plt.rcParams["font.family"] = "DejaVu Sans"
 
-    method = "cnn"  # "ls", "lms", "cnn"
+    method = "lms"  # "ls", "lms", "cnn"
     cnn_backend = "torch"  # "torch" or "numpy"
 
     prm = build_params()
