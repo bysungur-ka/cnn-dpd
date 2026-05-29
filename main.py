@@ -1,5 +1,5 @@
-import copy
 import os
+import copy
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -14,18 +14,27 @@ from ls_alg import (
     apply_predistorter,
     nmse_db_gain_aligned,
 )
-
 from lms_alg import (
-    lms_postdistorter_coeffs,
-    apply_mp_predistorter,
-    train_lms_ila_predistorter,
+    train_lms_feedback_predistorter,
+    apply_mp_feedback_predistorter,
+    estimate_integer_lag,
+    align_pair_by_lag,
 )
-
 from cnn_dpd import cnn_dpd
 from cnn_dpd_torch import (
     cnn_dpd_torch,
     CNNPostDistorter,
     apply_predistorter_torch,
+)
+from plot_utils import (
+    set_thesis_plot_style,
+    gain_align,
+    plot_amam_ampm,
+    plot_gain_vs_input,
+    plot_training_history,
+    plot_pa_amam_ampm,
+    plot_pa_gain_vs_input,
+    plot_pa_input_output_spectrum,
 )
 
 
@@ -39,7 +48,7 @@ def build_params():
         # generator seeds
         "signal_seed_train": 101,
         "signal_seed_test": 202,
-        "plot_signal": True,
+        "plot_signal": False,
         "plot_dir": "figures",
         "plot_prefix": "ofdm_input_signal",
         "iq_plot_samples": 2000,
@@ -54,10 +63,15 @@ def build_params():
         "gmp_aligned_memory": 3,
         "gmp_lag_orders": [1, 3, 5],
         "gmp_lag_memory": 3,
-        "gmp_lag_env_delays": [1, 2],
+        "gmp_lag_env_delays": [],  # [1, 2],
+        # Для отладки LMS лучше временно отключить lead terms,
+        # потому что direct online LMS чувствителен к некаузальным членам GMP.
+        # Для финальной GMP-модели можно вернуть [1, 3, 5] и [1, 2].
         "gmp_lead_orders": [1, 3, 5],
-        "gmp_lead_memory": 3,
         "gmp_lead_env_delays": [1, 2],
+        # "gmp_lead_orders": [],
+        # "gmp_lead_env_delays": [],
+        "gmp_lead_memory": 3,
         # OFDM-like params
         "ofdm_nfft": 1024,
         "ofdm_scs": 30e3,
@@ -75,11 +89,11 @@ def build_params():
         "kernel": 5,
         "filters": 6,
         "M1": 8,
-        "epochs": 120,
+        "epochs": 70,
         "lr": 1e-3,
         "seed": 42,
         "features": "poly",
-        "print_every": 10,
+        "print_every": 5,
         "clip": 1.0,
         "weight_decay": 0.0,
         "ila_iters": 10,
@@ -92,41 +106,38 @@ def build_params():
     }
 
     prm["lms"] = {
-        "orders": (1, 3, 5, 7),
-        "memory_depth": 5,
-        "mu": 0.03,
-        "epochs": 5,
-        "ila_iters": 8,
-        "warm_start": True,
+        "orders": (1, 3, 5),
+        "memory_depth": 3,
+        "mu": 1e-4,
+        "epochs": 1,
+        "block_size": 1,
+        "context_len": 64,
+        "right_context": 64,
+        "feedback_gain": 0.3,
+        "update_sign": 1.0,
+        "normalized": False,
+        "delay": 0,
+        "max_lag": 20,
+        "use_gain": True,
+        "use_block_gain": False,
+        "gain_ref": "x",
+        "power_constraint": True,
+        "coef_leak": 0.0,
+        "max_coef_norm": None,
+        "min_amp_ratio": 0.03,
+        "print_every": 20000,
+        "eval_every": 20000,
+        "max_eval_len": 20000,
         "keep_best": True,
-        "print_every": 1,
-        "verbose": True,
     }
 
     return prm
 
 
-def set_thesis_plot_style():
-
-    plt.rcParams.update(
-        {
-            "font.family": "DejaVu Sans",
-            "font.size": 13,
-            "axes.labelsize": 14,
-            "axes.titlesize": 14,
-            "legend.fontsize": 12,
-            "xtick.labelsize": 12,
-            "ytick.labelsize": 12,
-            "figure.titlesize": 14,
-            "lines.linewidth": 1.5,
-            "axes.grid": True,
-            "grid.linewidth": 0.5,
-        }
-    )
-
-
 def run_dpd(method, cnn_backend, x_al, y_al, prm):
-    if method.lower() == "ls":
+    method = method.lower()
+
+    if method == "ls":
         orders = (1, 3, 5)
         memory_depth = 8
         ridge = 1e-2
@@ -155,21 +166,21 @@ def run_dpd(method, cnn_backend, x_al, y_al, prm):
             "kind": "mp_ls",
         }
 
-    elif method.lower() == "lms":
-
-        lms_prm = prm.get("lms", {})
-
-        x_dpd, model = train_lms_ila_predistorter(
+    elif method == "lms":
+        x_dpd, model = train_lms_feedback_predistorter(
             x_al=x_al,
             y_al=y_al,
-            pa_fn=lambda u: amp_model(prm, u),
-            lms_prm=lms_prm,
+            pa_fn=lambda z: amp_model(prm, z),
+            lms_prm=prm["lms"],
         )
 
-    elif method.lower() == "cnn":
+    elif method == "cnn":
         if cnn_backend == "torch":
             x_dpd, model = cnn_dpd_torch(
-                x_al, y_al, prm, pa_fn=lambda z: amp_model(prm, z)
+                x_al,
+                y_al,
+                prm,
+                pa_fn=lambda z: amp_model(prm, z),
             )
             model["kind"] = "cnn_torch"
         elif cnn_backend == "numpy":
@@ -182,131 +193,6 @@ def run_dpd(method, cnn_backend, x_al, y_al, prm):
         raise ValueError('method must be "ls" or "lms" or "cnn"')
 
     return x_dpd, model
-
-
-def gain_align(y, x):
-    denom = np.vdot(x, x) + 1e-15
-    G = np.vdot(x, y) / denom
-    y_al = y / (G + 1e-15)
-    return y_al, G
-
-
-def _scatter_stride(n, max_points=25000):
-    return max(1, int(np.ceil(n / max_points)))
-
-
-def plot_amam_ampm(x_ref, y_before, y_after):
-    yb_al, _ = gain_align(y_before, x_ref)
-    ya_al, _ = gain_align(y_after, x_ref)
-
-    a_in = np.abs(x_ref)
-    a_out_before = np.abs(yb_al)
-    a_out_after = np.abs(ya_al)
-
-    phi_before = np.angle(yb_al * np.conj(x_ref), deg=True)
-    phi_after = np.angle(ya_al * np.conj(x_ref), deg=True)
-
-    thr_phi = 0.05 * np.max(a_in)
-    mask_phi = a_in > thr_phi
-
-    stride_am = _scatter_stride(len(a_in), max_points=30000)
-    stride_pm = _scatter_stride(np.count_nonzero(mask_phi), max_points=30000)
-
-    fig, ax = plt.subplots(1, 2, figsize=(12, 5))
-
-    ax[0].scatter(
-        a_in[::stride_am], a_out_before[::stride_am], s=10, alpha=0.45, label="До DPD"
-    )
-    ax[0].scatter(
-        a_in[::stride_am], a_out_after[::stride_am], s=10, alpha=0.45, label="После DPD"
-    )
-
-    lim = max(np.max(a_in), np.max(a_out_before), np.max(a_out_after))
-    ax[0].plot([0, lim], [0, lim], "--", linewidth=1.0, label="Идеальная линейность")
-    ax[0].set_xlabel("Амплитуда входного сигнала")
-    ax[0].set_ylabel("Амплитуда выходного сигнала")
-    ax[0].set_title("AM/AM характеристика")
-    ax[0].grid(True)
-    ax[0].legend()
-
-    a_in_phi = a_in[mask_phi][::stride_pm]
-    phi_b = phi_before[mask_phi][::stride_pm]
-    phi_a = phi_after[mask_phi][::stride_pm]
-
-    ax[1].scatter(a_in_phi, phi_b, s=10, alpha=0.45, label="До DPD")
-    ax[1].scatter(a_in_phi, phi_a, s=10, alpha=0.45, label="После DPD")
-    ax[1].axhline(0.0, linestyle="--", linewidth=1.0, label="Идеальная линейность")
-    ax[1].set_xlabel("Амплитуда входного сигнала")
-    ax[1].set_ylabel("Фазовая ошибка, градусы")
-    ax[1].set_title("AM/PM характеристика")
-    ax[1].grid(True)
-    ax[1].legend()
-
-    fig.suptitle("Амплитудно-амплитудная и амплитудно-фазовая характеристики каскада")
-    fig.tight_layout()
-
-
-def plot_gain_vs_input(x_ref, y_before, y_after):
-    yb_al, _ = gain_align(y_before, x_ref)
-    ya_al, _ = gain_align(y_after, x_ref)
-
-    eps = 1e-15
-    pin_db = 20 * np.log10(np.abs(x_ref) + eps)
-    pout_before_db = 20 * np.log10(np.abs(yb_al) + eps)
-    pout_after_db = 20 * np.log10(np.abs(ya_al) + eps)
-
-    gain_before_db = pout_before_db - pin_db
-    gain_after_db = pout_after_db - pin_db
-
-    thr = 0.02 * np.max(np.abs(x_ref))
-    mask = np.abs(x_ref) > thr
-
-    pin_db = pin_db[mask]
-    gain_before_db = gain_before_db[mask]
-    gain_after_db = gain_after_db[mask]
-
-    stride = _scatter_stride(len(pin_db), max_points=30000)
-
-    plt.figure(figsize=(6, 5))
-    plt.scatter(
-        pin_db[::stride], gain_before_db[::stride], s=10, alpha=0.45, label="До DPD"
-    )
-    plt.scatter(
-        pin_db[::stride], gain_after_db[::stride], s=10, alpha=0.45, label="После DPD"
-    )
-    plt.axhline(
-        0.0, linestyle="--", linewidth=1.0, label="Идеально постоянное усиление"
-    )
-    plt.xlabel("Уровень входного сигнала, дБ")
-    plt.ylabel("Коэффициент усиления, дБ")
-    plt.title("Gain vs Input Level")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-
-
-def plot_ila_history(model):
-    if not isinstance(model, dict):
-        return
-
-    nmse_after = np.asarray(model.get("nmse_after_hist_db", []), dtype=float)
-    if nmse_after.size == 0:
-        return
-
-    plt.figure()
-    plt.plot(
-        np.arange(1, len(nmse_after) + 1),
-        nmse_after,
-        marker="o",
-        linewidth=1.8,
-        label="NMSE",
-    )
-    plt.xlabel("Номер итерации ILA")
-    plt.ylabel("NMSE, дБ")
-    plt.title("Сходимость ILA по системной метрике NMSE")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
 
 
 def generate_aligned_pair(prm, signal_seed):
@@ -368,7 +254,9 @@ def apply_saved_cnn_torch(model_dict, x_ref):
 
 
 def apply_model_on_signal(method, cnn_backend, model, x_ref):
-    if method.lower() == "ls":
+    method = method.lower()
+
+    if method == "ls":
         return apply_predistorter(
             x_ref,
             model["a"],
@@ -376,19 +264,15 @@ def apply_model_on_signal(method, cnn_backend, model, x_ref):
             memory_depth=model["memory_depth"],
         )
 
-    if method.lower() == "lms":
-        x_dpd = apply_mp_predistorter(
+    if method == "lms":
+        return apply_mp_feedback_predistorter(
             x_ref,
             model["a"],
             orders=model["orders"],
             memory_depth=model["memory_depth"],
         )
 
-        x_dpd, _, _ = normalize_drive(x_ref, x_dpd)
-
-        return x_dpd
-
-    if method.lower() == "cnn":
+    if method == "cnn":
         if cnn_backend == "torch":
             return apply_saved_cnn_torch(model, x_ref)
         raise NotImplementedError(
@@ -398,48 +282,134 @@ def apply_model_on_signal(method, cnn_backend, model, x_ref):
     raise ValueError('method must be "ls" or "lms" or "cnn"')
 
 
+def style_before_after_lines(ax, before_label="До DPD", after_label="После DPD"):
+    lines = ax.get_lines()
+
+    if len(lines) >= 1:
+        lines[0].set_color("tab:blue")
+        lines[0].set_linewidth(2.4)
+        lines[0].set_label(before_label)
+
+    if len(lines) >= 2:
+        lines[1].set_color("tab:red")
+        lines[1].set_linewidth(2.4)
+        lines[1].set_label(after_label)
+
+
 def evaluate_case(tag, prm, method, cnn_backend, model, x_ref, y_ref, make_plots=False):
     x_dpd = apply_model_on_signal(method, cnn_backend, model, x_ref)
     x_dpd, p_ref, p_dpd = normalize_drive(x_ref, x_dpd)
 
-    y_lin = amp_model(prm, x_dpd)
+    # y_ref уже выровнен в generate_aligned_pair().
+    # y_lin_raw — сырой выход PA после применения DPD, его надо выровнять заново.
+    y_lin_raw = amp_model(prm, x_dpd)
 
-    nmse_before = nmse_db_gain_aligned(y_ref, x_ref)
-    nmse_after = nmse_db_gain_aligned(y_lin, x_ref)
+    lag_after = estimate_integer_lag(
+        x_ref,
+        y_lin_raw,
+        max_lag=300,
+    )
+
+    x_eval, y_lin = align_pair_by_lag(
+        x_ref,
+        y_lin_raw,
+        lag_after,
+    )
+
+    y_ref_eval = y_ref[: len(x_eval)]
+
+    nmse_before = nmse_db_gain_aligned(y_ref_eval, x_eval)
+    nmse_after = nmse_db_gain_aligned(y_lin, x_eval)
 
     print(f"\n[{tag}]")
+    print(f"Output alignment lag after DPD: {lag_after} samples")
     print(f"Input RMS power before DPD drive norm: {10*np.log10(p_dpd):.2f} dB")
     print(f"Reference RMS power: {10*np.log10(p_ref):.2f} dB")
     print(f"Gain-aligned NMSE before DPD: {nmse_before:.2f} dB")
     print(f"Gain-aligned NMSE after  DPD: {nmse_after:.2f} dB")
 
     fs = prm["txFs"] * prm["up"]
-    bw_aclr = prm["sigBand"] + 5e6
+    bw_aclr = prm["sigBand"]
 
+    plot_dir = prm.get("plot_dir", "figures")
+    os.makedirs(plot_dir, exist_ok=True)
+
+    # -------------------------------------------------
+    # PSD before/after DPD
+    # -------------------------------------------------
     fig0, ax0 = plot_psd_nr_style(
-        x_before=y_ref,
+        x_before=y_ref_eval,
         x_after=y_lin,
         fs=fs,
         nperseg=4096,
         noverlap=2048,
-        xlim_mhz=(-100, 100),
-        ylim_db=(-60, 5),
-        title=f"Спектральная плотность мощности на выходе усилителя [{tag}]",
+        xlim_mhz=(-50, 50),
+        ylim_db=(-60, 0),
+        title="Спектральная плотность мощности на выходе усилителя",
         common_ref=True,
     )
 
+    style_before_after_lines(
+        ax0,
+        before_label="До DPD",
+        after_label="После DPD",
+    )
+
+    ax0.set_xlim(-50, 50)
+    ax0.set_ylim(-60, 0)
+    ax0.set_xlabel("Частота, МГц")
+    ax0.set_ylabel("Спектральная плотность мощности, дБ")
+    ax0.set_title("Спектральная плотность мощности на выходе усилителя")
+    ax0.grid(True)
+    ax0.legend(loc="upper right")
+
+    fig0.tight_layout()
+
+    psd_path = os.path.join(
+        plot_dir,
+        f"{tag.lower()}_pa_output_psd_before_after_dpd.png",
+    )
+    fig0.savefig(psd_path, dpi=300, bbox_inches="tight")
+    print(f"[{tag}] Saved PSD plot: {psd_path}")
+
+    # -------------------------------------------------
+    # ACLR before/after DPD
+    # -------------------------------------------------
     fig, ax, met = plot_aclr_nr_style(
-        x_before=y_ref,
+        x_before=y_ref_eval,
         x_after=y_lin,
         fs=fs,
         bw=bw_aclr,
         nperseg=4096,
         noverlap=2048,
-        xlim_mhz=(-100, 100),
-        ylim_db=(-60, 5),
+        xlim_mhz=(-50, 50),
+        ylim_db=(-60, 0),
         title=f"ACLR для сигнала на выходе усилителя [{tag}]",
         common_ref=True,
     )
+
+    style_before_after_lines(
+        ax,
+        before_label="До DPD",
+        after_label="После DPD",
+    )
+
+    ax.set_xlim(-50, 50)
+    ax.set_ylim(-60, 0)
+    ax.set_xlabel("Частота, МГц")
+    ax.set_ylabel("Спектральная плотность мощности, дБ")
+    ax.set_title(f"ACLR для сигнала на выходе усилителя [{tag}]")
+    ax.grid(True)
+    ax.legend(loc="upper right")
+
+    fig.tight_layout()
+
+    aclr_path = os.path.join(
+        plot_dir,
+        f"{tag.lower()}_pa_output_aclr_before_after_dpd.png",
+    )
+    fig.savefig(aclr_path, dpi=300, bbox_inches="tight")
+    print(f"[{tag}] Saved ACLR plot: {aclr_path}")
 
     print(f"[{tag}] До DPD:")
     print(f"  ACLR(-1) = {met['before']['aclr_m1_db']:.2f} dB")
@@ -454,217 +424,19 @@ def evaluate_case(tag, prm, method, cnn_backend, model, x_ref, y_ref, make_plots
     print(f"  Leakage(+1) = {met['after']['leak_p1_dbc']:.2f} dBc")
 
     if make_plots:
-        plot_amam_ampm(x_ref, y_ref, y_lin)
-        plot_gain_vs_input(x_ref, y_ref, y_lin)
+        plot_amam_ampm(x_eval, y_ref_eval, y_lin)
+        plot_gain_vs_input(x_eval, y_ref_eval, y_lin)
 
     return {
         "x_dpd": x_dpd,
         "y_lin": y_lin,
+        "lag_after": lag_after,
         "nmse_before_db": nmse_before,
         "nmse_after_db": nmse_after,
         "aclr": met,
+        "psd_path": psd_path,
+        "aclr_path": aclr_path,
     }
-
-
-def plot_pa_amam_ampm(
-    x_in,
-    y_out,
-    out_dir="figures",
-    prefix="pa",
-    max_points=30000,
-    save=True,
-    show=False,
-):
-    """
-    Строит AM-AM и AM-PM характеристики модели усилителя мощности.
-
-    x_in  : вход усилителя u[n]
-    y_out : выход усилителя y[n]
-
-    Сохраняет:
-      figures/pa_am_am.png
-      figures/pa_am_pm.png
-    """
-    os.makedirs(out_dir, exist_ok=True)
-
-    x_in = np.asarray(x_in).reshape(-1)
-    y_out = np.asarray(y_out).reshape(-1)
-
-    n = min(len(x_in), len(y_out))
-    x_in = x_in[:n]
-    y_out = y_out[:n]
-
-    # Амплитуды
-    a_in = np.abs(x_in)
-    a_out = np.abs(y_out)
-
-    # Фазовый сдвиг между выходом и входом
-    phase_shift = np.angle(y_out * np.conj(x_in), deg=True)
-
-    # Убираем точки с очень малой входной амплитудой:
-    # там фаза плохо определена и дает шум на AM-PM.
-    amp_thr = 0.05 * np.max(a_in)
-    mask_pm = a_in > amp_thr
-
-    # Прореживание точек, чтобы PNG не был тяжелым
-    stride_am = max(1, len(a_in) // max_points)
-    stride_pm = max(1, np.count_nonzero(mask_pm) // max_points)
-
-    # -------------------------
-    # AM-AM
-    # -------------------------
-    fig, ax = plt.subplots(figsize=(7.2, 5.0))
-
-    ax.scatter(
-        a_in[::stride_am],
-        a_out[::stride_am],
-        s=7,
-        alpha=0.35,
-        label="Модель усилителя",
-    )
-
-    lim = max(np.max(a_in), np.max(a_out))
-    ax.plot(
-        [0, lim],
-        [0, lim],
-        "--",
-        linewidth=1.2,
-        label="Идеальная линейность",
-    )
-
-    ax.set_xlabel(r"Aмплитуда входного сигнала")
-    ax.set_ylabel(r"Амплитуда выходного сигнала")
-    ax.legend(loc="best")
-    ax.grid(True)
-
-    fig.tight_layout()
-
-    amam_path = os.path.join(out_dir, f"{prefix}_am_am.png")
-    if save:
-        fig.savefig(amam_path, dpi=300, bbox_inches="tight")
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-
-    # -------------------------
-    # AM-PM
-    # -------------------------
-    fig, ax = plt.subplots(figsize=(7.2, 5.0))
-
-    ax.scatter(
-        a_in[mask_pm][::stride_pm],
-        phase_shift[mask_pm][::stride_pm],
-        s=7,
-        alpha=0.35,
-        label="Модель усилителя",
-    )
-
-    ax.axhline(
-        0.0,
-        linestyle="--",
-        linewidth=1.2,
-        label="Отсутствие фазового сдвига",
-    )
-
-    ax.set_xlabel(r"Амплитуда входного сигнала")
-    ax.set_ylabel(r"Фазовый сдвиг, градусы")
-    ax.legend(loc="best")
-    ax.grid(True)
-
-    fig.tight_layout()
-
-    ampm_path = os.path.join(out_dir, f"{prefix}_am_pm.png")
-    if save:
-        fig.savefig(ampm_path, dpi=300, bbox_inches="tight")
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-
-    if save:
-        print("Saved PA AM-AM / AM-PM plots:")
-        print(f"  {amam_path}")
-        print(f"  {ampm_path}")
-
-    return amam_path, ampm_path
-
-
-def plot_pa_gain_vs_input(x_in, y_out):
-    y_al, _ = gain_align(y_out, x_in)
-
-    eps = 1e-15
-    pin_db = 20 * np.log10(np.abs(x_in) + eps)
-    pout_db = 20 * np.log10(np.abs(y_al) + eps)
-    gain_db = pout_db - pin_db
-
-    thr = 0.02 * np.max(np.abs(x_in))
-    mask = np.abs(x_in) > thr
-
-    pin_db = pin_db[mask]
-    gain_db = gain_db[mask]
-
-    stride = _scatter_stride(len(pin_db), max_points=30000)
-
-    plt.figure(figsize=(6, 5))
-    plt.scatter(pin_db[::stride], gain_db[::stride], s=10, alpha=0.45, label="PA")
-    plt.axhline(
-        0.0, linestyle="--", linewidth=1.0, label="Идеально постоянное усиление"
-    )
-    plt.xlabel("Уровень входного сигнала, дБ")
-    plt.ylabel("Коэффициент усиления, дБ")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-
-
-def plot_pa_input_output_spectrum(
-    x_in,
-    y_out,
-    prm,
-    out_dir="figures",
-    filename="pa_input_output_spectrum.png",
-):
-    """
-    Строит спектры входного и выходного сигналов усилителя.
-    """
-    os.makedirs(out_dir, exist_ok=True)
-
-    fs = prm["txFs"] * prm["up"]
-
-    fig, ax = plot_psd_nr_style(
-        x_before=x_in,
-        x_after=y_out,
-        fs=fs,
-        nperseg=4096,
-        noverlap=2048,
-        xlim_mhz=(-60, 60),
-        ylim_db=(-90, 5),
-        common_ref=True,
-    )
-
-    handles, labels = ax.get_legend_handles_labels()
-    if len(handles) >= 2:
-        ax.legend(
-            handles[:2],
-            ["Вход усилителя", "Выход усилителя"],
-            loc="best",
-        )
-
-    ax.set_xlabel("Частота, МГц")
-    ax.set_ylabel("Нормированная спектральная \n плотность мощности, дБ")
-    ax.grid(True)
-
-    fig.tight_layout()
-
-    path = os.path.join(out_dir, filename)
-    fig.savefig(path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-
-    print("Saved PA spectrum plot:")
-    print(f"  {path}")
-
-    return path
 
 
 def main():
@@ -687,7 +459,6 @@ def main():
     set_thesis_plot_style()
 
     eps = 1e-12
-
     norm = np.max(np.abs(x_train)) + eps
 
     x_plot = x_train / norm
@@ -717,7 +488,6 @@ def main():
     # Train DPD on train waveform
     _, model = run_dpd(method, cnn_backend, x_train, y_train, prm)
 
-    plot_pa_amam_ampm(x_train, y_train)
     plot_pa_gain_vs_input(x_train, y_train)
 
     # -----------------------------
@@ -753,8 +523,7 @@ def main():
         make_plots=True,
     )
 
-    # CNN ILA history makes sense to show once
-    plot_ila_history(model)
+    plot_training_history(model)
 
     plt.show()
 
