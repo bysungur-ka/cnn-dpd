@@ -68,22 +68,32 @@ def plot_amam_ampm(x_ref, y_before, y_after):
     fig, ax = plt.subplots(1, 2, figsize=(12, 5))
 
     ax[0].scatter(
-        a_in[::stride_am], a_out_before[::stride_am], s=10, alpha=0.45, label="До DPD"
+        a_in[::stride_am],
+        a_out_before[::stride_am],
+        s=10,
+        alpha=0.45,
+        label="Before DPD",
     )
     ax[0].scatter(
         a_in[::stride_am],
         a_out_after[::stride_am],
         s=10,
         alpha=0.45,
-        label="После DPD",
+        label="After DPD",
         color="tab:red",
     )
 
     lim = max(np.max(a_in), np.max(a_out_before), np.max(a_out_after))
-    ax[0].plot([0, lim], [0, lim], "--", linewidth=1.0, label="Идеальная линейность")
-    ax[0].set_xlabel("Амплитуда входного сигнала")
-    ax[0].set_ylabel("Амплитуда выходного сигнала")
-    ax[0].set_title("AM/AM характеристика")
+    ax[0].plot(
+        [0, lim],
+        [0, lim],
+        "--",
+        linewidth=1.0,
+        label="Ideal linear response",
+    )
+    ax[0].set_xlabel("Input signal amplitude")
+    ax[0].set_ylabel("Output signal amplitude")
+    ax[0].set_title("AM/AM characteristic")
     ax[0].grid(True)
     ax[0].legend()
 
@@ -91,16 +101,28 @@ def plot_amam_ampm(x_ref, y_before, y_after):
     phi_b = phi_before[mask_phi][::stride_pm]
     phi_a = phi_after[mask_phi][::stride_pm]
 
-    ax[1].scatter(a_in_phi, phi_b, s=10, alpha=0.45, label="До DPD")
-    ax[1].scatter(a_in_phi, phi_a, s=10, alpha=0.45, label="После DPD", color="tab:red")
-    ax[1].axhline(0.0, linestyle="--", linewidth=1.0, label="Идеальная линейность")
-    ax[1].set_xlabel("Амплитуда входного сигнала")
-    ax[1].set_ylabel("Фазовая ошибка, градусы")
-    ax[1].set_title("AM/PM характеристика")
+    ax[1].scatter(a_in_phi, phi_b, s=10, alpha=0.45, label="Before DPD")
+    ax[1].scatter(
+        a_in_phi,
+        phi_a,
+        s=10,
+        alpha=0.45,
+        label="After DPD",
+        color="tab:red",
+    )
+    ax[1].axhline(
+        0.0,
+        linestyle="--",
+        linewidth=1.0,
+        label="Ideal linear response",
+    )
+    ax[1].set_xlabel("Input signal amplitude")
+    ax[1].set_ylabel("Phase error, degrees")
+    ax[1].set_title("AM/PM characteristic")
     ax[1].grid(True)
     ax[1].legend()
 
-    fig.suptitle("Амплитудно-амплитудная и амплитудно-фазовая характеристики")
+    fig.suptitle("AM/AM and AM/PM characteristics")
     fig.tight_layout()
 
     return fig, ax
@@ -137,14 +159,27 @@ def plot_gain_vs_input(x_ref, y_before, y_after):
 
     fig, ax = plt.subplots(figsize=(6, 5))
     ax.scatter(
-        pin_db[::stride], gain_before_db[::stride], s=10, alpha=0.45, label="До DPD"
+        pin_db[::stride],
+        gain_before_db[::stride],
+        s=10,
+        alpha=0.45,
+        label="Before DPD",
     )
     ax.scatter(
-        pin_db[::stride], gain_after_db[::stride], s=10, alpha=0.45, label="После DPD"
+        pin_db[::stride],
+        gain_after_db[::stride],
+        s=10,
+        alpha=0.45,
+        label="After DPD",
     )
-    ax.axhline(0.0, linestyle="--", linewidth=1.0, label="Идеально постоянное усиление")
-    ax.set_xlabel("Уровень входного сигнала, дБ")
-    ax.set_ylabel("Коэффициент усиления, дБ")
+    ax.axhline(
+        0.0,
+        linestyle="--",
+        linewidth=1.0,
+        label="Ideal constant gain",
+    )
+    ax.set_xlabel("Input signal level, dB")
+    ax.set_ylabel("Gain, dB")
     ax.set_title("Gain vs Input Level")
     ax.grid(True)
     ax.legend()
@@ -164,10 +199,10 @@ def plot_training_history(model):
     sample_hist = np.asarray(model.get("sample_hist", []), dtype=float)
     if sample_hist.size == nmse_after.size:
         x_axis = sample_hist
-        x_label = "Номер обработанного отсчета"
+        x_label = "Processed sample index"
     else:
         x_axis = np.arange(1, len(nmse_after) + 1)
-        x_label = "Номер контрольной оценки"
+        x_label = "Validation step"
 
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.plot(
@@ -178,8 +213,8 @@ def plot_training_history(model):
         label="NMSE",
     )
     ax.set_xlabel(x_label)
-    ax.set_ylabel("NMSE, дБ")
-    ax.set_title("Сходимость LMS по системной метрике NMSE")
+    ax.set_ylabel("NMSE, dB")
+    ax.set_title("LMS convergence according to the system NMSE metric")
     ax.grid(True)
     ax.legend()
     fig.tight_layout()
@@ -196,7 +231,7 @@ def plot_pa_amam_ampm(
     save=True,
     show=False,
 ):
-    """Строит AM-AM и AM-PM характеристики модели усилителя мощности."""
+    """Plots AM/AM and AM/PM characteristics of the power amplifier model."""
     os.makedirs(out_dir, exist_ok=True)
 
     x_in = np.asarray(x_in, dtype=np.complex128).reshape(-1)
@@ -223,7 +258,7 @@ def plot_pa_amam_ampm(
         a_out[::stride_am],
         s=7,
         alpha=0.35,
-        label="Модель усилителя",
+        label="Power amplifier model",
     )
 
     lim = max(np.max(a_in), np.max(a_out))
@@ -232,11 +267,11 @@ def plot_pa_amam_ampm(
         [0, lim],
         "--",
         linewidth=1.2,
-        label="Идеальная линейность",
+        label="Ideal linear response",
     )
 
-    ax.set_xlabel(r"Амплитуда входного сигнала")
-    ax.set_ylabel(r"Амплитуда выходного сигнала")
+    ax.set_xlabel(r"Input signal amplitude")
+    ax.set_ylabel(r"Output signal amplitude")
     ax.legend(loc="best")
     ax.grid(True)
 
@@ -257,18 +292,18 @@ def plot_pa_amam_ampm(
         phase_shift[mask_pm][::stride_pm],
         s=7,
         alpha=0.35,
-        label="Модель усилителя",
+        label="Power amplifier model",
     )
 
     ax.axhline(
         0.0,
         linestyle="--",
         linewidth=1.2,
-        label="Отсутствие фазового сдвига",
+        label="No phase shift",
     )
 
-    ax.set_xlabel(r"Амплитуда входного сигнала")
-    ax.set_ylabel(r"Фазовый сдвиг, градусы")
+    ax.set_xlabel(r"Input signal amplitude")
+    ax.set_ylabel(r"Phase shift, degrees")
     ax.legend(loc="best")
     ax.grid(True)
 
@@ -307,10 +342,21 @@ def plot_pa_gain_vs_input(x_in, y_out):
     stride = _scatter_stride(len(pin_db), max_points=30000)
 
     fig, ax = plt.subplots(figsize=(6, 5))
-    ax.scatter(pin_db[::stride], gain_db[::stride], s=10, alpha=0.45, label="PA")
-    ax.axhline(0.0, linestyle="--", linewidth=1.0, label="Идеально постоянное усиление")
-    ax.set_xlabel("Уровень входного сигнала, дБ")
-    ax.set_ylabel("Коэффициент усиления, дБ")
+    ax.scatter(
+        pin_db[::stride],
+        gain_db[::stride],
+        s=10,
+        alpha=0.45,
+        label="PA",
+    )
+    ax.axhline(
+        0.0,
+        linestyle="--",
+        linewidth=1.0,
+        label="Ideal constant gain",
+    )
+    ax.set_xlabel("Input signal level, dB")
+    ax.set_ylabel("Gain, dB")
     ax.grid(True)
     ax.legend()
     fig.tight_layout()
@@ -325,7 +371,7 @@ def plot_pa_input_output_spectrum(
     out_dir="figures",
     filename="pa_input_output_spectrum.png",
 ):
-    """Строит спектры входного и выходного сигналов усилителя."""
+    """Plots spectra of the input and output signals of the power amplifier."""
     os.makedirs(out_dir, exist_ok=True)
 
     fs = prm["txFs"] * prm["up"]
@@ -345,12 +391,12 @@ def plot_pa_input_output_spectrum(
     if len(handles) >= 2:
         ax.legend(
             handles[:2],
-            ["Вход усилителя", "Выход усилителя"],
+            ["PA input", "PA output"],
             loc="best",
         )
 
-    ax.set_xlabel("Частота, МГц")
-    ax.set_ylabel("Нормированная спектральная \n плотность мощности, дБ")
+    ax.set_xlabel("Frequency, MHz")
+    ax.set_ylabel("Normalized power spectral density, dB")
     ax.grid(True)
 
     fig.tight_layout()

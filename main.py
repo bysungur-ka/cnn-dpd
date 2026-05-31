@@ -48,7 +48,7 @@ def build_params():
         # generator seeds
         "signal_seed_train": 101,
         "signal_seed_test": 202,
-        "plot_signal": False,
+        "plot_signal": True,
         "plot_dir": "figures",
         "plot_prefix": "ofdm_input_signal",
         "iq_plot_samples": 2000,

@@ -281,8 +281,8 @@ def _plot_generated_signal(x, prm, mode):
         ax.axvline(-sig_band / 2 / 1e6, linestyle="--", linewidth=1.0, color="gray")
         ax.axvline(sig_band / 2 / 1e6, linestyle="--", linewidth=1.0, color="gray")
 
-    ax.set_xlabel("Частота, МГц")
-    ax.set_ylabel("Нормированная спектральная \n плотность мощности, дБ")
+    ax.set_xlabel("Frequency, MHz")
+    ax.set_ylabel("Normalized power spectral density, dB")
     ax.grid(True, linewidth=0.4)
     ax.set_ylim(-70, 5)
     ax.set_xlim(-40, 40)
@@ -300,11 +300,11 @@ def _plot_generated_signal(x, prm, mode):
 
     fig, ax = plt.subplots(figsize=(7.2, 4.6))
 
-    ax.plot(t * 1e6, np.real(x[:n_show]), linewidth=1.0, label="I-компонента")
-    ax.plot(t * 1e6, np.imag(x[:n_show]), linewidth=1.0, label="Q-компонента")
+    ax.plot(t * 1e6, np.real(x[:n_show]), linewidth=1.0, label="I component")
+    ax.plot(t * 1e6, np.imag(x[:n_show]), linewidth=1.0, label="Q component")
 
-    ax.set_xlabel("Время, мкс")
-    ax.set_ylabel("Амплитуда, отн. ед.")
+    ax.set_xlabel("Time, μs")
+    ax.set_ylabel("Amplitude, a.u.")
     ax.grid(True, linewidth=0.4)
     ax.legend()
 
